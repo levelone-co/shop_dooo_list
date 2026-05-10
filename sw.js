@@ -1,5 +1,5 @@
-const CACHE = "shopwise-v1";
-const ASSETS = ["./", "./index.html", "./manifest.json", "./icon-192.svg", "./icon-512.svg"];
+const CACHE = "shopwise-v7";
+const ASSETS = ["./", "./index.html", "./manifest.json", "./icons/icon-192.svg", "./icons/icon-512.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).catch(() => {}));
