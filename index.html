@@ -515,24 +515,37 @@ function render() {
   const groups = {};
   for (const it of state.items) (groups[it.aisle] ||= []).push(it);
   const orderedZones = ZONES.filter(z => groups[z.id]).sort((a,b) => a.order - b.order);
+  const unknownItems = groups["unknown"] || [];
+
+  function renderItemRow(it, hasMap) {
+    const row = document.createElement("div");
+    row.className = "item" + (it.checked ? " checked" : "");
+    const findBtn = (state.shopping && hasMap)
+      ? `<button class="find-btn" data-find="${it.id}">📍 Find</button>`
+      : "";
+    row.innerHTML = `
+      <div class="check" data-id="${it.id}">${it.checked ? "✓" : ""}</div>
+      <div class="name">${escapeHtml(it.name)}</div>
+      ${findBtn}
+      <button class="del-btn" data-del="${it.id}" aria-label="Delete">✕</button>
+    `;
+    return row;
+  }
 
   for (const zone of orderedZones) {
     const group = document.createElement("div");
     group.className = "aisle-group";
     const subText = zone.sub ? ` — ${zone.sub}` : "";
     group.innerHTML = `<div class="aisle-header">${zone.name}${subText}</div>`;
-    for (const it of groups[zone.id]) {
-      const row = document.createElement("div");
-      row.className = "item" + (it.checked ? " checked" : "");
-      const findBtn = state.shopping ? `<button class="find-btn" data-find="${it.id}">📍 Find</button>` : "";
-      row.innerHTML = `
-        <div class="check" data-id="${it.id}">${it.checked ? "✓" : ""}</div>
-        <div class="name">${escapeHtml(it.name)}</div>
-        ${findBtn}
-        <button class="del-btn" data-del="${it.id}" aria-label="Delete">✕</button>
-      `;
-      group.appendChild(row);
-    }
+    for (const it of groups[zone.id]) group.appendChild(renderItemRow(it, true));
+    list.appendChild(group);
+  }
+
+  if (unknownItems.length) {
+    const group = document.createElement("div");
+    group.className = "aisle-group";
+    group.innerHTML = `<div class="aisle-header" style="color:var(--muted);border-bottom-color:var(--border)">Other — uncategorised</div>`;
+    for (const it of unknownItems) group.appendChild(renderItemRow(it, false));
     list.appendChild(group);
   }
 }
@@ -693,17 +706,53 @@ function findCatalogMatch(query) {
   if (!q) return null;
   const exact = CATALOG.find(c => c.name.toLowerCase() === q);
   if (exact) return exact;
-  const starts = CATALOG.find(c => c.name.toLowerCase().startsWith(q));
-  if (starts) return starts;
-  return CATALOG.find(c => c.name.toLowerCase().includes(q)) || null;
+  return null;
+}
+
+/* Keyword-based aisle inference for free-text items. Order matters:
+   first matching rule wins, so put more specific keywords first. */
+const AISLE_RULES = [
+  [["milk","cream","cheese","yog","butter","custard","maas","feta"], "dairy"],
+  [["bread","roll","muffin","croissant","bun","loaf","bagel","baguette","pita","pita bread"], "bakery"],
+  [["ham","salami","olive","russian","viennas","pate","polony"], "deli"],
+  [["beef","lamb","pork","chicken","mince","sausage","steak","bacon","wors","rib","liver"], "butchery"],
+  [["frozen","ice cream","ice-cream","fish finger"], "frozen"],
+  [["apple","banana","orange","tomato","onion","lettuce","carrot","potato","cucumber","spinach","pepper","lemon","lime","grape","avocado","mango","pear","cabbage","broccoli","mushroom","strawberry","fruit","veg","ginger","garlic","chilli","leek","beetroot","pumpkin","butternut"], "produce"],
+  [["chip","chocolate","sweet","candy","biscuit","cracker","slab","crisps","pretzel","nuts"], "a1"],
+  [["cereal","oat","muesli","weetbix","cornflake","pronutro","granola","porridge"], "a2"],
+  [["tin","tinned","canned","baked bean","pilchard","tuna","soup","tomato sauce","peach","corn"], "a3"],
+  [["pasta","rice","noodle","spaghetti","macaroni","cous","quinoa","lasagne"], "a4"],
+  [["soap","detergent","bleach","cleaner","polish","sponge","washing","dishwash","handy andy","domestos","pine","mr min"], "a5"],
+  [["shampoo","toothpaste","deodorant","razor","tampon","conditioner","floss","brush","sanitary","cotton wool","plaster","panty"], "a6"],
+  [["tea","coffee","juice","water","cola","wine","beer","cooldrink","cool drink","fanta","sprite","rooibos"], "a7"],
+  [["diaper","nappy","baby","pet","dog","cat","puppy","kitten","catfood","dogfood","biltong"], "a8"],
+  [["gum","mints","chappies"], "checkout"],
+];
+function guessAisle(name) {
+  const n = name.toLowerCase();
+  for (const [kws, aisle] of AISLE_RULES) {
+    for (const k of kws) if (n.includes(k)) return aisle;
+  }
+  return "unknown";
 }
 
 function addItem(query) {
-  const cat = findCatalogMatch(query);
-  if (!cat) return false;
-  if (state.items.some(i => i.name === cat.name)) return false;
+  if (!query) return false;
+  const trimmed = query.trim();
+  if (!trimmed) return false;
+  const cat = findCatalogMatch(trimmed);
+  let name, aisle;
+  if (cat) {
+    name = cat.name;
+    aisle = cat.aisle;
+  } else {
+    // Free-text entry: keep user's wording, guess the aisle.
+    name = trimmed.replace(/\s+/g, " ");
+    aisle = guessAisle(name);
+  }
+  if (state.items.some(i => i.name.toLowerCase() === name.toLowerCase())) return false;
   const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
-  state.items.push({ id, name: cat.name, aisle: cat.aisle, checked: false });
+  state.items.push({ id, name, aisle, checked: false });
   lastAction = { kind: "add", id };
   saveState();
   render();

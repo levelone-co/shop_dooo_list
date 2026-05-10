@@ -1,4 +1,4 @@
-# 🛒 Shop Wise
+# 🛒 Shop Wise — MVP (Skeleton only · not for production)
 
 > Smarter aisles. Faster trips.
 
@@ -66,10 +66,11 @@ shop-wise/
 - Aisle-internal ordering (front-to-back position within each aisle)
 - GPS / indoor positioning to drive the "You are here" pin for real
 - Multi-store support with editable aisle maps
-- Free-text item entry with AI/learned aisle inference
+- AI/learned aisle inference (smarter than current keyword rules)
 - Cross-device sync (would need a backend)
 - Print: include the aisle map alongside the list
 - Share: attach an image of the store map / route
+- Walking route: directional arrows along the path
 
 ## Status
 
