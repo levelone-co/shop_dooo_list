@@ -332,13 +332,21 @@
     margin-left: 6px;
     vertical-align: middle;
   }
-  .item .meta-line {
+  .item .info-line {
     font-size: 12px;
     color: var(--muted);
-    margin-top: 2px;
-    line-height: 1.3;
+    margin-top: 3px;
+    line-height: 1.5;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
   }
-  .item .meta-line .sep { margin: 0 4px; opacity: 0.5; }
+  .item .info-line .meta-text {
+    color: var(--muted);
+    margin-left: 4px;
+  }
+  .item .info-line .sep { margin: 0 4px; opacity: 0.5; }
   .item .find-btn {
     width: auto; padding: 6px 10px; font-size: 12px;
     background: var(--green-light); color: var(--green-dark); border: none;
@@ -675,7 +683,7 @@
 </main>
 
 <footer class="app-footer">
-  Shop Wise · <span id="appVersion">v1.6</span> · cloud-backed
+  Shop Wise · <span id="appVersion">v1.7</span> · cloud-backed
 </footer>
 
 <button class="reload-fab" id="reloadFab" aria-label="Reload">↻</button>
@@ -952,11 +960,24 @@ function render() {
 
   const total = state.items.length;
   const done = state.items.filter(i => i.checked).length;
+  // We compute filterActive + filtered later; preview here for the stat line
+  const filtered_count = state.retailerFilter.size > 0
+    ? state.items.filter(i => state.retailerFilter.has(i.retailer_id || "other")).length
+    : total;
+  const filtered_done = state.retailerFilter.size > 0
+    ? state.items.filter(i => state.retailerFilter.has(i.retailer_id || "other") && i.checked).length
+    : done;
+  const filterActiveLocal = state.retailerFilter.size > 0;
   $("statLine").textContent = state.loading
     ? "Loading…"
     : total === 0 ? ""
-    : state.shopping ? `${done} of ${total} collected`
-    : `${total} item${total === 1 ? "" : "s"} on list`;
+    : state.shopping
+      ? (filterActiveLocal
+          ? `${filtered_done} of ${filtered_count} collected (of ${total} items)`
+          : `${done} of ${total} collected`)
+      : (filterActiveLocal
+          ? `${filtered_count} of ${total} items showing`
+          : `${total} item${total === 1 ? "" : "s"} on list`);
 
   if (state.loading && total === 0) {
     list.innerHTML = `<div class="empty"><span class="emoji">⏳</span>Loading your list…</div>`;
@@ -1058,32 +1079,40 @@ function renderItem(it, retailer, hasAisle) {
   const linkBtn = (isOnline && it.online_order_link)
     ? `<a class="link-btn" href="${escapeAttr(it.online_order_link)}" target="_blank" rel="noopener noreferrer">🔗</a>` : "";
 
-  const badges = [];
-  if (it.source === "pre-do") badges.push(`<span class="badge predo">Pre-Do</span>`);
-  if (it.fulfilment_mode === "online" && !isOnline) badges.push(`<span class="badge">Online</span>`);
-  const badgeHtml = badges.length ? `<span class="badges">${badges.join("")}</span>` : "";
-
   const qty = it.quantity || 1;
-  const qtyBadge = qty > 1 ? `<span class="qty-badge">×${qty}</span>` : "";
+  // Always show the qty badge — even ×1 — per user spec.
+  const qtyBadge = `<span class="qty-badge">×${qty}</span>`;
 
-  // Meta line: brand · size · notes — only render if any present
+  // Single info-line: source badges first (PRE-DO etc. — hidden in shopping
+  // mode), then additional tag chips, then product meta. All wrap together.
+  const lineParts = [];
+  if (!state.shopping && it.source === "pre-do") {
+    lineParts.push(`<span class="badge predo">Pre-Do</span>`);
+  }
+  if (it.fulfilment_mode === "online" && !isOnline) {
+    lineParts.push(`<span class="badge">Online</span>`);
+  }
+  // Tag chips (comma-separated string)
+  for (const t of parseTags(it.tags)) {
+    const isWarn = /^no[- ]stock/i.test(t);
+    lineParts.push(`<span class="tag-chip${isWarn ? " warn" : ""}">${escapeHtml(t)}</span>`);
+  }
+  // Product meta — brand · size · notes (single muted text run)
   const metaParts = [];
   if (it.brand) metaParts.push(escapeHtml(it.brand));
   if (it.size)  metaParts.push(escapeHtml(it.size));
   if (it.notes) metaParts.push(escapeHtml(it.notes));
-  const metaLine = metaParts.length
-    ? `<div class="meta-line">${metaParts.join('<span class="sep">·</span>')}</div>`
-    : "";
-
-  // Tag chips (comma-separated string)
-  const tagsHtml = renderTagChips(it.tags);
+  if (metaParts.length) {
+    lineParts.push(`<span class="meta-text">${metaParts.join('<span class="sep">·</span>')}</span>`);
+  }
+  const infoLine = lineParts.length
+    ? `<div class="info-line">${lineParts.join("")}</div>` : "";
 
   row.innerHTML = `
     <div class="check" data-id="${it.id}">${it.checked ? "✓" : ""}</div>
     <div style="flex:1;min-width:0;">
-      <div class="name" data-edit="${it.id}">${escapeHtml(it.name)}${qtyBadge} ${badgeHtml}</div>
-      ${metaLine}
-      ${tagsHtml}
+      <div class="name" data-edit="${it.id}">${escapeHtml(it.name)}${qtyBadge}</div>
+      ${infoLine}
     </div>
     ${linkBtn}
     ${findBtn}
