@@ -1,4 +1,4 @@
-const CACHE = "shopwise-v13";
+const CACHE = "shopwise-v14";
 const ASSETS = ["./", "./index.html", "./manifest.json", "./icons/icon-192.svg", "./icons/icon-512.svg"];
 
 self.addEventListener("install", (e) => {

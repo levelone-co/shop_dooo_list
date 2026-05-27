@@ -422,6 +422,29 @@
     padding: 24px 16px calc(env(safe-area-inset-bottom) + 24px);
     opacity: 0.7;
   }
+  /* Floating reload button */
+  .reload-fab {
+    position: fixed;
+    right: 16px;
+    bottom: calc(env(safe-area-inset-bottom) + 16px);
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--green);
+    color: white;
+    border: none;
+    font-size: 22px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.22);
+    cursor: pointer;
+    z-index: 9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.5s, background 0.15s;
+  }
+  .reload-fab:active { background: var(--green-dark); }
+  .reload-fab.spinning { transform: rotate(360deg); }
+  @media print { .reload-fab { display: none !important; } }
   @media print {
     header, .add-row, .actions, .secondary-actions, .shopping-banner, .stat-line,
     .modal-overlay, .find-btn, .link-btn, .assign-btn, .del-btn, .check,
@@ -529,8 +552,10 @@
 </main>
 
 <footer class="app-footer">
-  Shop Wise · <span id="appVersion">v1.2</span> · cloud-backed
+  Shop Wise · <span id="appVersion">v1.3</span> · cloud-backed
 </footer>
+
+<button class="reload-fab" id="reloadFab" aria-label="Reload">↻</button>
 
 <!-- Finder modal -->
 <div class="modal-overlay" id="finderModal">
@@ -1012,16 +1037,21 @@ inputEl.addEventListener("blur", () => {
   setTimeout(() => suggBox.classList.remove("open"), 150);
 });
 
-suggBox.addEventListener("mousedown", (e) => {
+// pointerdown covers mouse + touch reliably (mousedown alone can miss
+// taps on iOS PWA).
+function selectSuggestion(e) {
   const s = e.target.closest(".suggestion");
   if (!s) return;
   e.preventDefault();
   addItem(s.dataset.name).then(ok => {
     if (ok) { inputEl.value = ""; lastTyped = ""; activeSugg = -1; suggBox.classList.remove("open"); inputEl.focus(); }
   });
-});
+}
+suggBox.addEventListener("pointerdown", selectSuggestion);
+// Fallback for older browsers
+suggBox.addEventListener("mousedown", selectSuggestion);
 
-$("chevronBtn").addEventListener("mousedown", (e) => {
+function toggleChevron(e) {
   e.preventDefault();
   if (suggBox.classList.contains("open")) { suggBox.classList.remove("open"); return; }
   const q = inputEl.value.trim();
@@ -1029,7 +1059,9 @@ $("chevronBtn").addEventListener("mousedown", (e) => {
   activeSugg = 0;
   renderSuggestions(matches, q);
   inputEl.focus();
-});
+}
+$("chevronBtn").addEventListener("pointerdown", toggleChevron);
+$("chevronBtn").addEventListener("mousedown", toggleChevron);
 
 /* ============ Item actions (server-backed) ============ */
 async function addItem(query) {
@@ -1412,6 +1444,12 @@ $("modePill").addEventListener("click", toggleShopping);
 $("shoppingBanner").addEventListener("click", toggleShopping);
 $("shareBtn").addEventListener("click", shareList);
 $("printBtn").addEventListener("click", () => window.print());
+$("reloadFab").addEventListener("click", async () => {
+  const btn = $("reloadFab");
+  btn.classList.add("spinning");
+  try { await refreshAll(); } catch (e) {}
+  setTimeout(() => btn.classList.remove("spinning"), 600);
+});
 $("list").addEventListener("click", (e) => {
   const c = e.target.closest("[data-id]");
   const f = e.target.closest("[data-find]");
