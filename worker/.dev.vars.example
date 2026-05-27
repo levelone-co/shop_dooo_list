@@ -1,0 +1,2 @@
+# Copy to .dev.vars for local development. Never commit .dev.vars.
+SHOPWISE_AUTH_TOKEN=local-dev-token-change-me

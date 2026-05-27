@@ -288,6 +288,14 @@
   }
   .empty .emoji { font-size: 48px; display: block; margin-bottom: 12px; }
   .stat-line { font-size: 13px; color: var(--muted); padding: 0 4px 8px; }
+  footer.app-footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 11px;
+    padding: 24px 16px calc(env(safe-area-inset-bottom) + 24px);
+    opacity: 0.7;
+  }
+  @media print { footer.app-footer { display: none !important; } }
 
   /* Modal / Finder */
   .modal-overlay {
@@ -353,6 +361,10 @@
 
   <div id="list"></div>
 </main>
+
+<footer class="app-footer">
+  Shop Wise · MVP <span id="appVersion">v0.4</span> · skeleton only — not for production
+</footer>
 
 <div class="modal-overlay" id="finderModal">
   <div class="modal">

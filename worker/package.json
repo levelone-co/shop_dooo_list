@@ -1,0 +1,22 @@
+{
+  "name": "shop-wise-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create shopwise",
+    "db:schema:local": "wrangler d1 execute shopwise --local --file=./schema.sql",
+    "db:seed:local": "wrangler d1 execute shopwise --local --file=./seed.sql",
+    "db:schema": "wrangler d1 execute shopwise --remote --file=./schema.sql",
+    "db:seed": "wrangler d1 execute shopwise --remote --file=./seed.sql",
+    "db:reset:local": "npm run db:schema:local && npm run db:seed:local",
+    "secret:token": "wrangler secret put SHOPWISE_AUTH_TOKEN"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240605.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.60.0"
+  }
+}
