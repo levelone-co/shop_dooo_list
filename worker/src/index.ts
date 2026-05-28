@@ -3,10 +3,21 @@
  * Routes documented in worker/README.md.
  */
 
+import { resolveItem } from "./resolver";
+import { checkPrices } from "./price-checker";
+
 export interface Env {
   DB: D1Database;
   SHOPWISE_AUTH_TOKEN: string;
   ALLOWED_ORIGINS: string;
+  // LLM provider secrets — only set if you want the resolver / price-check
+  // agent on. The router reads whichever applies based on RESOLVER_MODEL.
+  ANTHROPIC_API_KEY?: string;
+  DEEPSEEK_API_KEY?: string;
+  RESOLVER_AI_MODE?: string;     // "on" | "off" (default "off")
+  RESOLVER_MODEL?: string;        // default "deepseek-chat"
+  PRICE_CHECK_MODE?: string;      // "on" | "off"
+  PRICE_REFRESH_DAYS?: string;    // e.g. "30"
 }
 
 type Json = Record<string, unknown> | unknown[];
@@ -26,6 +37,20 @@ export default {
       return jsonResp({ ok: false, error: msg }, env, 500);
     }
   },
+
+  // Cron handler. Cloudflare invokes this on the schedule(s) configured in
+  // wrangler.toml [triggers].crons. We use it to drive the price-checking
+  // agent. It no-ops when PRICE_CHECK_MODE != "on".
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil((async () => {
+      try {
+        const r = await checkPrices(env);
+        console.log("price-check tick:", JSON.stringify(r));
+      } catch (e) {
+        console.error("price-check tick failed:", e);
+      }
+    })());
+  }
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -78,6 +103,11 @@ async function route(req: Request, env: Env, url: URL): Promise<Response> {
   if (m === "POST" && p === "/api/list/update")           return listUpdate(req, env);
   if (m === "POST" && p === "/api/list/delete")           return listDelete(req, env);
   if (m === "POST" && p === "/api/list/external-status")  return listExternalStatus(req, env);
+
+  // Admin: review queue (auto-created products awaiting human approval)
+  if (m === "GET"  && p === "/api/admin/review/pending") return getPendingReview(env);
+  if (m === "POST" && p === "/api/admin/review/approve") return approveProduct(req, env);
+  if (m === "POST" && p === "/api/admin/review/reject")  return rejectProduct(req, env);
 
   // Admin CRUD
   const adminMatch = p.match(/^\/api\/admin\/(retailers|products|aisles|locations)$/);
@@ -299,70 +329,29 @@ async function addItemToList(env: Env, opts: {
   sourceInboxId?: string | null;
   retailerOverride?: boolean;  // if true, don't fall back to product's default retailer
 }): Promise<{ id: string; merged: boolean; quantity: number }> {
-  // Step 1: split off a leading quantity prefix like "6 Soy Milks" or "2x milk"
-  // → quantity=6, name="Soy Milks". Only applied if the caller didn't pass an
-  // explicit quantity (so a deliberate quantity arg wins).
-  let rawName = opts.name.trim();
-  let parsedPrefixQty: number | undefined;
-  const prefix = rawName.match(/^(\d+)\s*x?\s+(.+)$/i);
-  if (prefix && opts.quantity === undefined) {
-    const q = parseInt(prefix[1], 10);
-    const rest = prefix[2].trim();
-    if (q > 0 && q < 1000 && rest.length > 1) {
-      parsedPrefixQty = q;
-      rawName = rest;
-    }
-  }
-
-  // Step 2: title-case + dedupe-friendly form
-  const name = smartTitleCase(rawName);
-  const addQty = Math.max(1, opts.quantity || parsedPrefixQty || 1);
+  // Strict-first, AI-fallback resolver. Returns a normalized name, any
+  // quantity it extracted, a possibly-matched product_id, and default
+  // retailer/aisle/brand/size/tags/notes from the catalog or LLM.
+  const resolved = await resolveItem(env, opts.name);
+  const name = resolved.name;
+  const addQty = Math.max(1, opts.quantity || resolved.quantity || 1);
   const now = nowIso();
 
-  // Resolve canonical product info if it exists in catalog. Tries exact
-  // match first, then singular (drop trailing 's'), then plural (add 's').
-  // This matches user dictation tolerantly: "Soy Milks" → "Soy Milk".
-  type Lookup = {
-    product_id: string; canonical_name: string;
-    default_brand: string | null; default_size: string | null;
-    default_quantity: number | null;
-    default_notes: string | null; default_tags: string | null;
-    default_retailer_id: string | null;
-    loc_retailer_id: string | null; loc_aisle_id: string | null;
-  };
-  const lookupSql =
-    `SELECT p.id AS product_id, p.name AS canonical_name,
-            p.default_brand, p.default_size, p.default_quantity,
-            p.default_notes, p.default_tags, p.default_retailer_id,
-            l.retailer_id AS loc_retailer_id, l.aisle_id AS loc_aisle_id
-     FROM products p
-     LEFT JOIN product_locations l ON l.product_id = p.id
-     WHERE LOWER(p.name) = LOWER(?)
-     ORDER BY l.is_primary DESC, l.retailer_id
-     LIMIT 1`;
-  let lookup = await env.DB.prepare(lookupSql).bind(name).first<Lookup>();
-  if (!lookup && name.length > 3 && name.toLowerCase().endsWith("s")) {
-    lookup = await env.DB.prepare(lookupSql).bind(name.slice(0, -1)).first<Lookup>();
-  }
-  if (!lookup && name.length > 1 && !name.toLowerCase().endsWith("s")) {
-    lookup = await env.DB.prepare(lookupSql).bind(name + "s").first<Lookup>();
-  }
+  // All product-side resolution already happened in resolveItem(). Caller
+  // overrides still win; resolver-supplied defaults fill blanks.
+  const canonical = resolved.name;
+  const productId = resolved.product_id ?? null;
 
-  const canonical = lookup?.canonical_name ?? name;
-  const productId = lookup?.product_id ?? null;
-
-  // Retailer resolution priority:
-  //   1. Explicit caller override (opts.retailerId)
-  //   2. Product's default_retailer_id (admin-set)
-  //   3. Primary product_location's retailer_id (matrix fallback)
   const retailerId = opts.retailerId !== undefined && opts.retailerId !== null
     ? opts.retailerId
-    : (lookup?.default_retailer_id || lookup?.loc_retailer_id || null);
+    : (resolved.retailer_id ?? null);
 
-  // Aisle: only auto-fill when the retailer matches the looked-up location
   let aisleId: string | null = opts.aisleId !== undefined && opts.aisleId !== null
     ? opts.aisleId
-    : ((retailerId === lookup?.loc_retailer_id) ? (lookup?.loc_aisle_id ?? null) : null);
+    : (resolved.aisle_id ?? null);
+  // If we ended up with a retailer but no aisle for in-store, try to pick one
+  // from product_locations (covers the case where resolver returned a
+  // retailer override but didn't know the aisle for that retailer).
   if (productId && retailerId && !aisleId && (opts.fulfilmentMode || "in_store") === "in_store") {
     const loc = await env.DB.prepare(
       `SELECT aisle_id FROM product_locations WHERE product_id = ? AND retailer_id = ?`
@@ -371,17 +360,12 @@ async function addItemToList(env: Env, opts: {
   }
   if (opts.fulfilmentMode === "online") aisleId = null;
 
-  // Other defaults from the product row. Caller wins; product default fills
-  // the blank; null otherwise.
-  const brand     = opts.brand !== undefined ? opts.brand : (lookup?.default_brand ?? null);
-  const size      = opts.size  !== undefined ? opts.size  : (lookup?.default_size  ?? null);
-  const notes     = opts.notes !== undefined ? opts.notes : (lookup?.default_notes ?? null);
-  const tags      = opts.tags  !== undefined ? opts.tags  : (lookup?.default_tags  ?? null);
-  // Default quantity: caller > product.default_quantity > 1. Only applies to
-  // NEW items, not merge increments — merges still bump by addQty (=1 by default).
-  const effectiveQty = opts.quantity !== undefined
-    ? Math.max(1, opts.quantity)
-    : Math.max(1, lookup?.default_quantity || addQty);
+  const brand = opts.brand !== undefined ? opts.brand : (resolved.brand ?? null);
+  const size  = opts.size  !== undefined ? opts.size  : (resolved.size  ?? null);
+  const notes = opts.notes !== undefined ? opts.notes : (resolved.notes ?? null);
+  const tags  = opts.tags  !== undefined ? opts.tags  : (resolved.tags  ?? null);
+
+  const effectiveQty = Math.max(1, opts.quantity || resolved.quantity || addQty);
   const fulfil    = opts.fulfilmentMode || "in_store";
   const orderLink = opts.onlineOrderLink || null;
   const source    = opts.source || "manual";
@@ -695,6 +679,41 @@ async function adminUpdate(req: Request, env: Env, resource: string): Promise<Re
   }
 
   return await applyAdminUpdate(env, def, resource, body);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Pending-review (AI auto-created products)
+// ─────────────────────────────────────────────────────────────────────────
+async function getPendingReview(env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    `SELECT id, name, brand, notes, default_brand, default_size, default_quantity,
+            default_notes, default_tags, default_retailer_id, created_by,
+            review_status, created_at
+     FROM products
+     WHERE review_status = 'pending'
+     ORDER BY created_at DESC`
+  ).all();
+  return jsonResp({ ok: true, products: results }, env);
+}
+
+async function approveProduct(req: Request, env: Env): Promise<Response> {
+  const body = await readJson(req);
+  const id = body.id as string;
+  if (!id) return jsonResp({ ok: false, error: "id required" }, env, 400);
+  await env.DB.prepare(
+    `UPDATE products SET review_status = NULL, updated_at = ? WHERE id = ?`
+  ).bind(nowIso(), id).run();
+  return jsonResp({ ok: true }, env);
+}
+
+async function rejectProduct(req: Request, env: Env): Promise<Response> {
+  const body = await readJson(req);
+  const id = body.id as string;
+  if (!id) return jsonResp({ ok: false, error: "id required" }, env, 400);
+  // Hard-delete: rejected AI products shouldn't linger. Cascades remove the
+  // seeded product_location too.
+  await env.DB.prepare(`DELETE FROM products WHERE id = ?`).bind(id).run();
+  return jsonResp({ ok: true }, env);
 }
 
 async function adminDelete(req: Request, env: Env, resource: string): Promise<Response> {

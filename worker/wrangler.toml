@@ -12,11 +12,32 @@ database_id = "b820ea69-9235-4a35-afa7-2f5de33ef756"
 
 [vars]
 # Public, non-secret env vars go here.
-# Secrets (SHOPWISE_AUTH_TOKEN) are set via: npx wrangler secret put SHOPWISE_AUTH_TOKEN
+# Secrets (SHOPWISE_AUTH_TOKEN, DEEPSEEK_API_KEY, ANTHROPIC_API_KEY) are set via:
+#   npx wrangler secret put SHOPWISE_AUTH_TOKEN
+#   npx wrangler secret put DEEPSEEK_API_KEY
+#   npx wrangler secret put ANTHROPIC_API_KEY   (only if you want claude-* resolver)
 
 # Optional: comma-separated allowed origins for CORS. Leave empty for "*".
 ALLOWED_ORIGINS = ""
 
+# AI resolver: when "on", the Worker calls an LLM to interpret items the
+# strict resolver can't match exactly. New products it deduces get a
+# `pending_review` flag (visible in Admin → Products). Default off so the
+# behaviour matches today's until you've set DEEPSEEK_API_KEY.
+RESOLVER_AI_MODE = "off"
+RESOLVER_MODEL   = "deepseek-chat"
+
+# Price-checking agent: same on/off; the cron handler skips when off.
+# When on, scans product_locations rows whose indicative_price_updated_at
+# is older than PRICE_REFRESH_DAYS (or null) and asks the LLM for an
+# updated indicative price.
+PRICE_CHECK_MODE   = "off"
+PRICE_REFRESH_DAYS = "30"
+
 # Observability
 [observability]
 enabled = true
+
+# Daily 06:00 UTC price-check sweep (no-op when PRICE_CHECK_MODE=off).
+[triggers]
+crons = ["0 6 * * *"]

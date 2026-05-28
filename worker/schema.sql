@@ -55,6 +55,10 @@ CREATE TABLE products (
   name          TEXT NOT NULL,
   brand         TEXT,
   notes         TEXT,
+  -- Provenance + curation state. created_by ∈ {"human","ai"}; review_status
+  -- null = approved; "pending" = AI-created, awaiting human review.
+  created_by    TEXT,
+  review_status TEXT,
   -- Defaults applied when this product is added to a shopping list. Each is
   -- a "what to use if the caller doesn't specify" hint, not a hard constraint.
   default_brand            TEXT,

@@ -614,6 +614,23 @@
     font-weight: 600;
   }
   .admin-add-btn:active { background: var(--green); color: white; }
+  .review-section {
+    background: var(--green-light);
+    border: 1px solid var(--green);
+    border-radius: 10px;
+    padding: 10px;
+    margin-bottom: 14px;
+  }
+  .review-header {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--green-dark);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }
+  .review-row { gap: 6px; }
+  .review-row button { padding: 6px 10px; font-size: 12px; }
   .catalog-matrix {
     width: 100%;
     border-collapse: collapse;
@@ -723,7 +740,7 @@
 </main>
 
 <footer class="app-footer">
-  Shop Wise · <span id="appVersion">v2.3</span> · cloud-backed
+  Shop Wise · <span id="appVersion">v2.4</span> · cloud-backed
 </footer>
 
 <button class="reload-fab" id="reloadFab" aria-label="Reload">↻</button>
@@ -1771,7 +1788,55 @@ function renderAdminRetailers(body) {
   }
 }
 
-function renderAdminProducts(body) {
+async function renderAdminProducts(body) {
+  // Pending-review section (AI auto-created products awaiting human curate)
+  try {
+    const r = await api("/api/admin/review/pending", { auth: false });
+    if (r.products && r.products.length) {
+      const sec = document.createElement("div");
+      sec.className = "review-section";
+      sec.innerHTML = `<div class="review-header">🤖 Pending review (${r.products.length}) — auto-created by the resolver</div>`;
+      for (const p of r.products) {
+        const meta = [];
+        if (p.default_brand)      meta.push("brand: " + p.default_brand);
+        if (p.default_size)       meta.push("size: " + p.default_size);
+        if (p.default_quantity)   meta.push("qty: " + p.default_quantity);
+        if (p.default_retailer_id) meta.push("retailer: " + p.default_retailer_id);
+        if (p.default_tags)       meta.push("tags: " + p.default_tags);
+        const row = document.createElement("div");
+        row.className = "admin-list-row review-row";
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="row-name">${escapeHtml(p.name)}</div>
+            <div class="row-sub">${meta.length ? escapeHtml(meta.join(" · ")) : "(no defaults set)"}</div>
+          </div>
+          <button class="secondary" data-review-edit="${escapeAttr(p.id)}">Edit</button>
+          <button class="secondary" data-review-approve="${escapeAttr(p.id)}">✓ Approve</button>
+          <button class="danger" data-review-reject="${escapeAttr(p.id)}">✕ Reject</button>
+        `;
+        sec.appendChild(row);
+      }
+      sec.addEventListener("click", async (e) => {
+        const ap = e.target.closest("[data-review-approve]");
+        const rj = e.target.closest("[data-review-reject]");
+        const ed = e.target.closest("[data-review-edit]");
+        if (ap) {
+          try { await api("/api/admin/review/approve", { method: "POST", body: { id: ap.dataset.reviewApprove } }); toast("Approved"); await refreshAll(); renderAdminTab(); }
+          catch (err) { alert("Approve failed: " + err.message); }
+        } else if (rj) {
+          if (!confirm("Reject (delete) this auto-created product? It will be removed.")) return;
+          try { await api("/api/admin/review/reject", { method: "POST", body: { id: rj.dataset.reviewReject } }); toast("Rejected"); await refreshAll(); renderAdminTab(); }
+          catch (err) { alert("Reject failed: " + err.message); }
+        } else if (ed) {
+          // Hand off to the normal product editor with all fields populated
+          const prod = r.products.find(x => x.id === ed.dataset.reviewEdit);
+          if (prod) openAdminEdit("products", prod);
+        }
+      });
+      body.appendChild(sec);
+    }
+  } catch (_) { /* review endpoint optional; ignore */ }
+
   // Group products by name (catalog may have multiple rows per product via locations)
   const products = new Map();
   for (const c of state.catalog) {
