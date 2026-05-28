@@ -618,12 +618,13 @@ async function adminCreate(req: Request, env: Env, resource: string): Promise<Re
 
   if (!body.id) body.id = def.defaultIdPrefix ? `${def.defaultIdPrefix}${uuid()}` : uuid();
 
-  // Auto-stamp price timestamps when the price field is supplied.
+  // Auto-stamp price timestamps when the price field is supplied; null the
+  // timestamp out when the price itself is cleared.
   if (resource === "products" && "default_price" in body && !("default_price_updated_at" in body)) {
-    body.default_price_updated_at = nowIso();
+    body.default_price_updated_at = body.default_price == null ? null : nowIso();
   }
   if (resource === "locations" && "indicative_price" in body && !("indicative_price_updated_at" in body)) {
-    body.indicative_price_updated_at = nowIso();
+    body.indicative_price_updated_at = body.indicative_price == null ? null : nowIso();
   }
 
   // Locations have a UNIQUE (product_id, retailer_id) constraint. If a row
@@ -687,10 +688,10 @@ async function adminUpdate(req: Request, env: Env, resource: string): Promise<Re
   if (!body.id) return jsonResp({ ok: false, error: "id required" }, env, 400);
 
   if (resource === "products" && "default_price" in body && !("default_price_updated_at" in body)) {
-    body.default_price_updated_at = nowIso();
+    body.default_price_updated_at = body.default_price == null ? null : nowIso();
   }
   if (resource === "locations" && "indicative_price" in body && !("indicative_price_updated_at" in body)) {
-    body.indicative_price_updated_at = nowIso();
+    body.indicative_price_updated_at = body.indicative_price == null ? null : nowIso();
   }
 
   return await applyAdminUpdate(env, def, resource, body);

@@ -1899,7 +1899,9 @@ async function renderProductMatrix(area, productId) {
            <option value="">—</option>
            ${aisleOpts}
          </select>`;
-    const priceStamp = loc?.indicative_price_updated_at
+    // Only show the timestamp when there's actually a price set — a stale
+    // timestamp on a cleared price would be misleading.
+    const priceStamp = (loc?.indicative_price != null && loc?.indicative_price_updated_at)
       ? `<div class="ts">Last priced: ${escapeHtml(shortDate(loc.indicative_price_updated_at))}</div>` : "";
     const tr = document.createElement("tr");
     tr.dataset.retailer = r.id;
