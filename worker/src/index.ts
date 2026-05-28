@@ -189,7 +189,8 @@ async function getCatalog(env: Env, url: URL): Promise<Response> {
   const retailer = url.searchParams.get("retailer");
   let q = `
     SELECT p.id AS product_id, p.name, p.brand, p.notes,
-           p.default_brand, p.default_size,
+           p.default_brand, p.default_size, p.default_quantity, p.default_notes,
+           p.default_tags, p.default_retailer_id, p.default_price, p.default_price_updated_at,
            l.retailer_id, l.aisle_id, l.indicative_price, l.is_primary
     FROM products p
     LEFT JOIN product_locations l ON l.product_id = p.id
@@ -288,6 +289,8 @@ async function addItemToList(env: Env, opts: {
   aisleId?: string | null;
   brand?: string | null;
   size?: string | null;
+  notes?: string | null;
+  tags?: string | null;
   fulfilmentMode?: "in_store" | "online";
   onlineOrderLink?: string | null;
   source?: "manual" | "pre-do";
@@ -301,10 +304,14 @@ async function addItemToList(env: Env, opts: {
   const addQty = Math.max(1, opts.quantity || 1);
   const now = nowIso();
 
-  // Resolve canonical product info if it exists in catalog
+  // Resolve canonical product info if it exists in catalog. We pull the
+  // product-level defaults (brand/size/qty/notes/tags/retailer) and also
+  // the primary product_location for fallback retailer/aisle.
   const lookup = await env.DB.prepare(
-    `SELECT p.id AS product_id, p.name AS canonical_name, p.default_brand, p.default_size,
-            l.retailer_id, l.aisle_id
+    `SELECT p.id AS product_id, p.name AS canonical_name,
+            p.default_brand, p.default_size, p.default_quantity,
+            p.default_notes, p.default_tags, p.default_retailer_id,
+            l.retailer_id AS loc_retailer_id, l.aisle_id AS loc_aisle_id
      FROM products p
      LEFT JOIN product_locations l ON l.product_id = p.id
      WHERE LOWER(p.name) = LOWER(?)
@@ -313,18 +320,27 @@ async function addItemToList(env: Env, opts: {
   ).bind(name).first<{
     product_id: string; canonical_name: string;
     default_brand: string | null; default_size: string | null;
-    retailer_id: string | null; aisle_id: string | null;
+    default_quantity: number | null;
+    default_notes: string | null; default_tags: string | null;
+    default_retailer_id: string | null;
+    loc_retailer_id: string | null; loc_aisle_id: string | null;
   }>();
 
-  const canonical  = lookup?.canonical_name ?? name;
-  const productId  = lookup?.product_id ?? null;
+  const canonical = lookup?.canonical_name ?? name;
+  const productId = lookup?.product_id ?? null;
+
+  // Retailer resolution priority:
+  //   1. Explicit caller override (opts.retailerId)
+  //   2. Product's default_retailer_id (admin-set)
+  //   3. Primary product_location's retailer_id (matrix fallback)
   const retailerId = opts.retailerId !== undefined && opts.retailerId !== null
     ? opts.retailerId
-    : (lookup?.retailer_id ?? null);
+    : (lookup?.default_retailer_id || lookup?.loc_retailer_id || null);
+
+  // Aisle: only auto-fill when the retailer matches the looked-up location
   let aisleId: string | null = opts.aisleId !== undefined && opts.aisleId !== null
     ? opts.aisleId
-    : ((retailerId === lookup?.retailer_id) ? (lookup?.aisle_id ?? null) : null);
-  // If retailer overridden but no aisle, try to find aisle for that retailer
+    : ((retailerId === lookup?.loc_retailer_id) ? (lookup?.loc_aisle_id ?? null) : null);
   if (productId && retailerId && !aisleId && (opts.fulfilmentMode || "in_store") === "in_store") {
     const loc = await env.DB.prepare(
       `SELECT aisle_id FROM product_locations WHERE product_id = ? AND retailer_id = ?`
@@ -333,8 +349,17 @@ async function addItemToList(env: Env, opts: {
   }
   if (opts.fulfilmentMode === "online") aisleId = null;
 
+  // Other defaults from the product row. Caller wins; product default fills
+  // the blank; null otherwise.
   const brand     = opts.brand !== undefined ? opts.brand : (lookup?.default_brand ?? null);
   const size      = opts.size  !== undefined ? opts.size  : (lookup?.default_size  ?? null);
+  const notes     = opts.notes !== undefined ? opts.notes : (lookup?.default_notes ?? null);
+  const tags      = opts.tags  !== undefined ? opts.tags  : (lookup?.default_tags  ?? null);
+  // Default quantity: caller > product.default_quantity > 1. Only applies to
+  // NEW items, not merge increments — merges still bump by addQty (=1 by default).
+  const effectiveQty = opts.quantity !== undefined
+    ? Math.max(1, opts.quantity)
+    : Math.max(1, lookup?.default_quantity || addQty);
   const fulfil    = opts.fulfilmentMode || "in_store";
   const orderLink = opts.onlineOrderLink || null;
   const source    = opts.source || "manual";
@@ -361,15 +386,15 @@ async function addItemToList(env: Env, opts: {
   const id = uuid();
   await env.DB.prepare(
     `INSERT INTO list_items
-       (id, name, product_id, retailer_id, aisle_id, quantity, brand, size,
+       (id, name, product_id, retailer_id, aisle_id, quantity, brand, size, notes, tags,
         fulfilment_mode, online_order_link, source, source_action_id, source_inbox_id,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(id, canonical, productId, retailerId, aisleId, addQty, brand, size,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(id, canonical, productId, retailerId, aisleId, effectiveQty, brand, size, notes, tags,
          fulfil, orderLink, source, opts.sourceActionId || null, opts.sourceInboxId || null,
          now, now).run();
 
-  return { id, merged: false, quantity: addQty };
+  return { id, merged: false, quantity: effectiveQty };
 }
 
 async function listAdd(req: Request, env: Env): Promise<Response> {
@@ -383,6 +408,8 @@ async function listAdd(req: Request, env: Env): Promise<Response> {
     aisleId: body.aisleId as string | undefined,
     brand: body.brand as string | undefined,
     size: body.size as string | undefined,
+    notes: body.notes as string | undefined,
+    tags: body.tags as string | undefined,
     fulfilmentMode: (body.fulfilmentMode as "in_store" | "online" | undefined),
     onlineOrderLink: body.onlineOrderLink as string | undefined,
   });
@@ -545,7 +572,9 @@ const ADMIN_SCHEMA: Record<string, { table: string; fields: string[]; defaultIdP
   },
   products: {
     table: "products",
-    fields: ["id", "name", "brand", "notes", "default_brand", "default_size"],
+    fields: ["id", "name", "brand", "notes",
+             "default_brand", "default_size", "default_quantity", "default_notes",
+             "default_tags", "default_retailer_id", "default_price", "default_price_updated_at"],
     defaultIdPrefix: "prod-",
   },
   aisles: {
@@ -565,6 +594,13 @@ async function adminCreate(req: Request, env: Env, resource: string): Promise<Re
   const body = await readJson(req);
 
   if (!body.id) body.id = def.defaultIdPrefix ? `${def.defaultIdPrefix}${uuid()}` : uuid();
+
+  // Auto-stamp the price timestamp whenever default_price is supplied,
+  // unless the caller explicitly provided their own timestamp (e.g. an
+  // agent backfilling history).
+  if (resource === "products" && "default_price" in body && !("default_price_updated_at" in body)) {
+    body.default_price_updated_at = nowIso();
+  }
 
   const cols: string[] = [];
   const placeholders: string[] = [];
@@ -594,6 +630,12 @@ async function adminUpdate(req: Request, env: Env, resource: string): Promise<Re
   const body = await readJson(req);
   const id = body.id as string;
   if (!id) return jsonResp({ ok: false, error: "id required" }, env, 400);
+
+  // Auto-stamp price timestamp on default_price change, unless caller
+  // explicitly passed default_price_updated_at.
+  if (resource === "products" && "default_price" in body && !("default_price_updated_at" in body)) {
+    body.default_price_updated_at = nowIso();
+  }
 
   const sets: string[] = [];
   const binds: unknown[] = [];

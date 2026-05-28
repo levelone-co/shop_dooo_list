@@ -55,8 +55,16 @@ CREATE TABLE products (
   name          TEXT NOT NULL,
   brand         TEXT,
   notes         TEXT,
-  default_brand TEXT,
-  default_size  TEXT,                              -- "1kg" / "4 pack" / "500g"
+  -- Defaults applied when this product is added to a shopping list. Each is
+  -- a "what to use if the caller doesn't specify" hint, not a hard constraint.
+  default_brand            TEXT,
+  default_size             TEXT,                   -- "1kg" / "4 pack" / "500g"
+  default_quantity         INTEGER,                -- e.g. 4 for "4-pack batteries"
+  default_notes            TEXT,
+  default_tags             TEXT,                   -- comma-separated, e.g. "sixty60"
+  default_retailer_id      TEXT REFERENCES retailers(id),
+  default_price            REAL,                   -- indicative; agent-updateable
+  default_price_updated_at TEXT,                   -- ISO timestamp; auto-set when price changes
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
