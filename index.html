@@ -342,6 +342,19 @@
     margin-left: 6px;
     vertical-align: middle;
   }
+  .item .price-badge {
+    display: inline-block;
+    background: #fef3c7;
+    color: #78350f;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+  [data-theme="dark"] .item .price-badge { background: #422006; color: #fde68a; }
+  .item.checked .price-badge { opacity: 0.5; }
   .item .item-line .meta-text {
     color: var(--muted);
     font-size: 12px;
@@ -763,7 +776,7 @@
 </main>
 
 <footer class="app-footer">
-  Shop Wise · <span id="appVersion">v2.5</span> · cloud-backed
+  Shop Wise · <span id="appVersion">v2.6</span> · cloud-backed
 </footer>
 
 <button class="reload-fab" id="reloadFab" aria-label="Reload">↻</button>
@@ -1157,6 +1170,18 @@ function renderItem(it, retailer, hasAisle) {
   // Always show the qty badge — even ×1 — per user spec.
   const qtyBadge = `<span class="qty-badge">×${qty}</span>`;
 
+  // Per-retailer indicative price (joined from product_locations). Hidden
+  // when blank. Total (price × qty) shown next to unit price when qty > 1.
+  const unitPrice = (it.indicative_price != null && !isNaN(Number(it.indicative_price)))
+    ? Number(it.indicative_price) : null;
+  let priceBadge = "";
+  if (unitPrice != null) {
+    const fmt = (n) => "R" + (n % 1 === 0 ? n.toString() : n.toFixed(2));
+    priceBadge = qty > 1
+      ? `<span class="price-badge">${fmt(unitPrice)} ea · ${fmt(unitPrice * qty)}</span>`
+      : `<span class="price-badge">${fmt(unitPrice)}</span>`;
+  }
+
   // Single-line layout: name + qty + Pre-Do (list mode only) + tags + meta,
   // all inline. Whatever was on a second line collapses up here.
   const extras = [];
@@ -1187,7 +1212,7 @@ function renderItem(it, retailer, hasAisle) {
   row.innerHTML = `
     ${checkEl}
     <div class="item-line">
-      <span class="name">${escapeHtml(it.name)}</span>${qtyBadge}${extras.join("")}
+      <span class="name">${escapeHtml(it.name)}</span>${qtyBadge}${priceBadge}${extras.join("")}
     </div>
     ${linkBtn}
     ${delEl}
@@ -1219,7 +1244,8 @@ function shortDate(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
-  return String(d.getFullYear()).slice(-2) + "/" + (d.getMonth() + 1) + "/" + d.getDate();
+  const pad = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "/" + pad(d.getMonth() + 1) + "/" + pad(d.getDate());
 }
 function escapeAttr(s) { return escapeHtml(s); }
 

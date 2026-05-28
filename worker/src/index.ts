@@ -260,10 +260,13 @@ async function getList(env: Env, url: URL): Promise<Response> {
            li.created_at, li.updated_at,
            r.name AS retailer_name, r.kind AS retailer_kind, r.color AS retailer_color,
            r.online_url_template,
-           a.name AS aisle_name, a.sub AS aisle_sub, a.position AS aisle_position
+           a.name AS aisle_name, a.sub AS aisle_sub, a.position AS aisle_position,
+           pl.indicative_price, pl.indicative_price_updated_at
     FROM list_items li
     LEFT JOIN retailers r ON r.id = li.retailer_id
     LEFT JOIN aisles a ON a.id = li.aisle_id
+    LEFT JOIN product_locations pl
+           ON pl.product_id = li.product_id AND pl.retailer_id = li.retailer_id
     WHERE 1=1
   `;
   const binds: unknown[] = [];
