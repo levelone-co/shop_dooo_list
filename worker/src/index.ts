@@ -191,7 +191,8 @@ async function getCatalog(env: Env, url: URL): Promise<Response> {
     SELECT p.id AS product_id, p.name, p.brand, p.notes,
            p.default_brand, p.default_size, p.default_quantity, p.default_notes,
            p.default_tags, p.default_retailer_id, p.default_price, p.default_price_updated_at,
-           l.retailer_id, l.aisle_id, l.indicative_price, l.is_primary
+           l.id AS location_id, l.retailer_id, l.aisle_id,
+           l.indicative_price, l.indicative_price_updated_at, l.is_primary
     FROM products p
     LEFT JOIN product_locations l ON l.product_id = p.id
   `;
@@ -298,16 +299,38 @@ async function addItemToList(env: Env, opts: {
   sourceInboxId?: string | null;
   retailerOverride?: boolean;  // if true, don't fall back to product's default retailer
 }): Promise<{ id: string; merged: boolean; quantity: number }> {
-  // Normalise the incoming name before lookup/insert so the list is tidy
-  // regardless of how the user typed/dictated it.
-  const name = smartTitleCase(opts.name);
-  const addQty = Math.max(1, opts.quantity || 1);
+  // Step 1: split off a leading quantity prefix like "6 Soy Milks" or "2x milk"
+  // → quantity=6, name="Soy Milks". Only applied if the caller didn't pass an
+  // explicit quantity (so a deliberate quantity arg wins).
+  let rawName = opts.name.trim();
+  let parsedPrefixQty: number | undefined;
+  const prefix = rawName.match(/^(\d+)\s*x?\s+(.+)$/i);
+  if (prefix && opts.quantity === undefined) {
+    const q = parseInt(prefix[1], 10);
+    const rest = prefix[2].trim();
+    if (q > 0 && q < 1000 && rest.length > 1) {
+      parsedPrefixQty = q;
+      rawName = rest;
+    }
+  }
+
+  // Step 2: title-case + dedupe-friendly form
+  const name = smartTitleCase(rawName);
+  const addQty = Math.max(1, opts.quantity || parsedPrefixQty || 1);
   const now = nowIso();
 
-  // Resolve canonical product info if it exists in catalog. We pull the
-  // product-level defaults (brand/size/qty/notes/tags/retailer) and also
-  // the primary product_location for fallback retailer/aisle.
-  const lookup = await env.DB.prepare(
+  // Resolve canonical product info if it exists in catalog. Tries exact
+  // match first, then singular (drop trailing 's'), then plural (add 's').
+  // This matches user dictation tolerantly: "Soy Milks" → "Soy Milk".
+  type Lookup = {
+    product_id: string; canonical_name: string;
+    default_brand: string | null; default_size: string | null;
+    default_quantity: number | null;
+    default_notes: string | null; default_tags: string | null;
+    default_retailer_id: string | null;
+    loc_retailer_id: string | null; loc_aisle_id: string | null;
+  };
+  const lookupSql =
     `SELECT p.id AS product_id, p.name AS canonical_name,
             p.default_brand, p.default_size, p.default_quantity,
             p.default_notes, p.default_tags, p.default_retailer_id,
@@ -316,15 +339,14 @@ async function addItemToList(env: Env, opts: {
      LEFT JOIN product_locations l ON l.product_id = p.id
      WHERE LOWER(p.name) = LOWER(?)
      ORDER BY l.is_primary DESC, l.retailer_id
-     LIMIT 1`
-  ).bind(name).first<{
-    product_id: string; canonical_name: string;
-    default_brand: string | null; default_size: string | null;
-    default_quantity: number | null;
-    default_notes: string | null; default_tags: string | null;
-    default_retailer_id: string | null;
-    loc_retailer_id: string | null; loc_aisle_id: string | null;
-  }>();
+     LIMIT 1`;
+  let lookup = await env.DB.prepare(lookupSql).bind(name).first<Lookup>();
+  if (!lookup && name.length > 3 && name.toLowerCase().endsWith("s")) {
+    lookup = await env.DB.prepare(lookupSql).bind(name.slice(0, -1)).first<Lookup>();
+  }
+  if (!lookup && name.length > 1 && !name.toLowerCase().endsWith("s")) {
+    lookup = await env.DB.prepare(lookupSql).bind(name + "s").first<Lookup>();
+  }
 
   const canonical = lookup?.canonical_name ?? name;
   const productId = lookup?.product_id ?? null;
@@ -583,7 +605,8 @@ const ADMIN_SCHEMA: Record<string, { table: string; fields: string[]; defaultIdP
   },
   locations: {
     table: "product_locations",
-    fields: ["id", "product_id", "retailer_id", "aisle_id", "indicative_price", "is_primary"],
+    fields: ["id", "product_id", "retailer_id", "aisle_id",
+             "indicative_price", "indicative_price_updated_at", "is_primary"],
     defaultIdPrefix: "loc-",
   },
 };
@@ -595,11 +618,27 @@ async function adminCreate(req: Request, env: Env, resource: string): Promise<Re
 
   if (!body.id) body.id = def.defaultIdPrefix ? `${def.defaultIdPrefix}${uuid()}` : uuid();
 
-  // Auto-stamp the price timestamp whenever default_price is supplied,
-  // unless the caller explicitly provided their own timestamp (e.g. an
-  // agent backfilling history).
+  // Auto-stamp price timestamps when the price field is supplied.
   if (resource === "products" && "default_price" in body && !("default_price_updated_at" in body)) {
     body.default_price_updated_at = nowIso();
+  }
+  if (resource === "locations" && "indicative_price" in body && !("indicative_price_updated_at" in body)) {
+    body.indicative_price_updated_at = nowIso();
+  }
+
+  // Locations have a UNIQUE (product_id, retailer_id) constraint. If a row
+  // already exists for the pair, update it in place instead of throwing
+  // "UNIQUE constraint failed". This also lets the matrix-table UI use a
+  // single "save" path for both new and existing cells.
+  if (resource === "locations") {
+    const existing = await env.DB.prepare(
+      `SELECT id FROM product_locations WHERE product_id = ? AND retailer_id = ?`
+    ).bind(body.product_id, body.retailer_id).first<{ id: string }>();
+    if (existing) {
+      // Fold into the update path so we don't duplicate the SET logic
+      body.id = existing.id;
+      return await applyAdminUpdate(env, def, resource, body);
+    }
   }
 
   const cols: string[] = [];
@@ -624,19 +663,10 @@ async function adminCreate(req: Request, env: Env, resource: string): Promise<Re
   return jsonResp({ ok: true, id: body.id }, env, 201);
 }
 
-async function adminUpdate(req: Request, env: Env, resource: string): Promise<Response> {
-  const def = ADMIN_SCHEMA[resource];
-  if (!def) return jsonResp({ ok: false, error: "Unknown resource" }, env, 400);
-  const body = await readJson(req);
-  const id = body.id as string;
-  if (!id) return jsonResp({ ok: false, error: "id required" }, env, 400);
-
-  // Auto-stamp price timestamp on default_price change, unless caller
-  // explicitly passed default_price_updated_at.
-  if (resource === "products" && "default_price" in body && !("default_price_updated_at" in body)) {
-    body.default_price_updated_at = nowIso();
-  }
-
+/** Extracted so adminCreate can delegate when it hits an existing row. */
+async function applyAdminUpdate(
+  env: Env, def: { table: string; fields: string[] }, resource: string, body: Record<string, unknown>
+): Promise<Response> {
   const sets: string[] = [];
   const binds: unknown[] = [];
   for (const f of def.fields) {
@@ -644,11 +674,26 @@ async function adminUpdate(req: Request, env: Env, resource: string): Promise<Re
     if (f in body) { sets.push(`${f} = ?`); binds.push(body[f]); }
   }
   if (resource !== "aisles") { sets.push(`updated_at = ?`); binds.push(nowIso()); }
-  if (!sets.length) return jsonResp({ ok: false, error: "no fields to update" }, env, 400);
-
-  binds.push(id);
+  if (!sets.length) return jsonResp({ ok: true, id: body.id, noChanges: true }, env);
+  binds.push(body.id);
   await env.DB.prepare(`UPDATE ${def.table} SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
-  return jsonResp({ ok: true }, env);
+  return jsonResp({ ok: true, id: body.id }, env);
+}
+
+async function adminUpdate(req: Request, env: Env, resource: string): Promise<Response> {
+  const def = ADMIN_SCHEMA[resource];
+  if (!def) return jsonResp({ ok: false, error: "Unknown resource" }, env, 400);
+  const body = await readJson(req);
+  if (!body.id) return jsonResp({ ok: false, error: "id required" }, env, 400);
+
+  if (resource === "products" && "default_price" in body && !("default_price_updated_at" in body)) {
+    body.default_price_updated_at = nowIso();
+  }
+  if (resource === "locations" && "indicative_price" in body && !("indicative_price_updated_at" in body)) {
+    body.indicative_price_updated_at = nowIso();
+  }
+
+  return await applyAdminUpdate(env, def, resource, body);
 }
 
 async function adminDelete(req: Request, env: Env, resource: string): Promise<Response> {

@@ -614,6 +614,45 @@
     font-weight: 600;
   }
   .admin-add-btn:active { background: var(--green); color: white; }
+  .catalog-matrix {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .catalog-matrix th {
+    text-align: left;
+    padding: 8px 6px;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+  }
+  .catalog-matrix td {
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .catalog-matrix select,
+  .catalog-matrix input {
+    width: 100%;
+    padding: 6px 8px;
+    font-size: 13px;
+  }
+  .catalog-matrix .ts {
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .catalog-matrix .retailer-cell {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .catalog-matrix .retailer-cell .dot {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+  }
+  .catalog-matrix .rname { font-weight: 600; }
+  .catalog-matrix .rkind { font-size: 10px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -683,7 +722,7 @@
 </main>
 
 <footer class="app-footer">
-  Shop Wise · <span id="appVersion">v2.1</span> · cloud-backed
+  Shop Wise · <span id="appVersion">v2.2</span> · cloud-backed
 </footer>
 
 <button class="reload-fab" id="reloadFab" aria-label="Reload">↻</button>
@@ -1768,10 +1807,9 @@ function renderAdminProducts(body) {
 }
 
 function renderAdminCatalog(body) {
-  // "Catalog" tab = the matrix. Pick a product → see locations.
   const intro = document.createElement("div");
   intro.style.cssText = "padding:8px 4px;font-size:13px;color:var(--muted);";
-  intro.textContent = "Pick a product to edit which retailers stock it and at which aisle:";
+  intro.textContent = "Pick a product to set its aisle and indicative price at every retailer:";
   body.appendChild(intro);
 
   const sel = document.createElement("select");
@@ -1788,33 +1826,157 @@ function renderAdminCatalog(body) {
   });
   body.appendChild(sel);
 
-  const locArea = document.createElement("div");
-  body.appendChild(locArea);
+  const tableArea = document.createElement("div");
+  body.appendChild(tableArea);
 
-  sel.onchange = () => renderProductLocations(locArea, sel.value);
+  sel.onchange = () => renderProductMatrix(tableArea, sel.value);
 }
 
-async function renderProductLocations(area, productId) {
+/**
+ * Render a single-product × all-retailers matrix.
+ *  • One row per retailer (down the left).
+ *  • Aisle dropdown (filtered to that retailer's aisles).
+ *  • Indicative price input.
+ *  • Per-row "Last priced" timestamp when a price has been set.
+ *  • Single "Save All" button at the bottom batches all changes.
+ *  • A row that had data → cleared empties = delete the location.
+ */
+async function renderProductMatrix(area, productId) {
   area.innerHTML = "";
   if (!productId) return;
-  const locs = state.catalog.filter(c => c.product_id === productId && c.retailer_id);
 
-  // For each retailer, show current location (or "not stocked")
-  for (const r of state.retailers) {
-    const loc = locs.find(l => l.retailer_id === r.id);
-    const row = document.createElement("div");
-    row.className = "admin-list-row";
-    row.innerHTML = `
-      <span class="dot" style="background:${r.color || "#6b7280"}"></span>
-      <div class="row-main">
-        <div class="row-name">${escapeHtml(r.name)}</div>
-        <div class="row-sub">${loc ? `Aisle: ${loc.aisle_id || "(not set)"}${loc.indicative_price ? " · R" + loc.indicative_price : ""}` : "Not stocked"}</div>
-      </div>
-      <span class="row-chevron">${loc ? "›" : "+"}</span>
-    `;
-    row.onclick = () => openAdminEdit("locations", loc ? { ...loc, product_id: productId } : { product_id: productId, retailer_id: r.id });
-    area.appendChild(row);
+  // Existing locations for this product, keyed by retailer
+  const existingByRetailer = new Map();
+  for (const c of state.catalog) {
+    if (c.product_id === productId && c.retailer_id && c.location_id) {
+      existingByRetailer.set(c.retailer_id, c);
+    }
   }
+
+  // Pre-fetch aisles for retailers that need them (in-store / hybrid).
+  // Online retailers + "other" get no aisle dropdown.
+  const needs = state.retailers.filter(r => r.kind !== "online" && r.id !== "other");
+  await Promise.all(needs.map(r => ensureAislesFor(r.id)));
+
+  const tbl = document.createElement("table");
+  tbl.className = "catalog-matrix";
+  tbl.innerHTML = `
+    <thead>
+      <tr>
+        <th style="width:34%">Retailer</th>
+        <th>Aisle</th>
+        <th style="width:24%">Price (R)</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  const tbody = tbl.querySelector("tbody");
+
+  for (const r of state.retailers) {
+    const loc = existingByRetailer.get(r.id);
+    const aisles = state.aislesByRetailer.get(r.id) || [];
+    const aisleOpts = aisles.map(a =>
+      `<option value="${escapeAttr(a.id)}"${a.id === loc?.aisle_id ? " selected" : ""}>${escapeHtml(a.name)}${a.sub ? " — " + escapeHtml(a.sub) : ""}</option>`
+    ).join("");
+    const aisleSelect = (r.kind === "online" || r.id === "other")
+      ? `<span style="color:var(--muted);font-size:12px">(no aisle)</span>`
+      : `<select data-retailer="${escapeAttr(r.id)}" data-field="aisle">
+           <option value="">—</option>
+           ${aisleOpts}
+         </select>`;
+    const priceStamp = loc?.indicative_price_updated_at
+      ? `<div class="ts">Last priced: ${escapeHtml(loc.indicative_price_updated_at)}</div>` : "";
+    const tr = document.createElement("tr");
+    tr.dataset.retailer = r.id;
+    tr.dataset.locationId = loc?.location_id || "";
+    tr.dataset.initial = JSON.stringify({ aisle: loc?.aisle_id || "", price: loc?.indicative_price ?? "" });
+    tr.innerHTML = `
+      <td>
+        <div class="retailer-cell">
+          <span class="dot" style="background:${r.color || "#6b7280"}"></span>
+          <div>
+            <div class="rname">${escapeHtml(r.name)}</div>
+            <div class="rkind">${r.kind}</div>
+          </div>
+        </div>
+      </td>
+      <td>${aisleSelect}</td>
+      <td>
+        <input data-retailer="${escapeAttr(r.id)}" data-field="price" type="number" step="0.01"
+               value="${loc?.indicative_price ?? ""}" placeholder="—" />
+        ${priceStamp}
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+  area.appendChild(tbl);
+
+  const saveBar = document.createElement("div");
+  saveBar.style.cssText = "margin-top:14px;display:flex;gap:8px;align-items:center;justify-content:flex-end;";
+  saveBar.innerHTML = `
+    <span style="font-size:12px;color:var(--muted);margin-right:auto">💡 Clear aisle + price to remove a retailer from this product.</span>
+    <button class="secondary" id="catalogCancel">Cancel</button>
+    <button id="catalogSaveAll">Save All</button>
+  `;
+  area.appendChild(saveBar);
+
+  $("catalogCancel").onclick = () => renderProductMatrix(area, productId); // re-render = reset
+  $("catalogSaveAll").onclick = () => saveProductMatrix(productId, tbody);
+}
+
+async function saveProductMatrix(productId, tbody) {
+  const rows = [...tbody.querySelectorAll("tr")];
+  let created = 0, updated = 0, deleted = 0, unchanged = 0, failed = 0;
+  for (const tr of rows) {
+    const retailerId = tr.dataset.retailer;
+    const locationId = tr.dataset.locationId;
+    const initial = JSON.parse(tr.dataset.initial || "{}");
+    const aisle = tr.querySelector('[data-field="aisle"]')?.value || "";
+    const priceRaw = tr.querySelector('[data-field="price"]')?.value;
+    const price = priceRaw === "" || priceRaw == null ? null : parseFloat(priceRaw);
+    const hasData = !!aisle || price != null;
+    const isUnchanged = (aisle || "") === (initial.aisle || "") &&
+                        (priceRaw === "" ? "" : String(price)) === (initial.price === "" || initial.price == null ? "" : String(initial.price));
+
+    if (isUnchanged) { unchanged++; continue; }
+
+    try {
+      if (locationId && !hasData) {
+        // Cleared a previously-set row → delete the location.
+        await api("/api/admin/locations", { method: "DELETE", body: { id: locationId } });
+        deleted++;
+      } else if (locationId) {
+        await api("/api/admin/locations", { method: "PATCH", body: {
+          id: locationId, aisle_id: aisle || null, indicative_price: price
+        }});
+        updated++;
+      } else if (hasData) {
+        // New location (the Worker's POST upserts on conflict, so this is safe)
+        await api("/api/admin/locations", { method: "POST", body: {
+          product_id: productId, retailer_id: retailerId,
+          aisle_id: aisle || null, indicative_price: price
+        }});
+        created++;
+      } else {
+        unchanged++;
+      }
+    } catch (err) {
+      failed++;
+      console.error("saveProductMatrix:", retailerId, err);
+    }
+  }
+  const summary = [];
+  if (created) summary.push(`${created} added`);
+  if (updated) summary.push(`${updated} updated`);
+  if (deleted) summary.push(`${deleted} removed`);
+  if (failed) summary.push(`${failed} failed`);
+  if (!summary.length) summary.push("no changes");
+  toast(summary.join(", "));
+  await refreshAll();
+  // Re-render with fresh data
+  const sel = $("adminBody").querySelector("select");
+  const area = sel?.parentElement?.querySelector("div:last-child");
+  if (sel && area && sel.value === productId) renderProductMatrix(area, productId);
 }
 
 /* ── Admin edit dialog ── */
@@ -1844,11 +2006,11 @@ async function openAdminEdit(resource, row) {
       <label><input id="ae_is_default" type="checkbox" ${row?.is_default ? "checked" : ""} /> Default retailer (only one)</label>
     `;
   } else if (resource === "products") {
-    // Default retailer dropdown — show all retailers, blank = use matrix primary
+    // Default retailer dropdown — show all retailers, blank = use matrix primary.
+    // Price lives on Catalog (per-retailer), not on the product itself.
     const retOpts = state.retailers.map(r =>
       `<option value="${escapeAttr(r.id)}"${r.id === row?.default_retailer_id ? " selected" : ""}>${escapeHtml(r.name)} (${r.kind})</option>`
     ).join("");
-    const priceTs = row?.default_price_updated_at ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">Last priced: ${escapeHtml(row.default_price_updated_at)}</div>` : "";
     form.innerHTML = `
       <label>Name</label>
       <input id="ae_name" type="text" value="${escapeAttr(row?.name || "")}" />
@@ -1871,9 +2033,7 @@ async function openAdminEdit(resource, row) {
         <option value="">(use matrix primary)</option>
         ${retOpts}
       </select>
-      <label>Default price (indicative)</label>
-      <input id="ae_default_price" type="number" step="0.01" value="${row?.default_price ?? ""}" placeholder="R" />
-      ${priceTs}
+      <div style="font-size:11px;color:var(--muted);margin-top:8px">💡 Set indicative prices per retailer in the <strong>Catalog</strong> tab.</div>
     `;
   } else if (resource === "locations") {
     // Aisle picker depends on retailer
@@ -1893,15 +2053,45 @@ async function openAdminEdit(resource, row) {
     `;
   }
 
+  // Snapshot AFTER the form is populated so we can detect no-op saves.
+  adminEditInitial = snapshotAdminEditForm(resource);
   $("adminEditModal").classList.add("open");
 }
 
 $("adminEditCancel").addEventListener("click", () => $("adminEditModal").classList.remove("open"));
 
+// Track the initial form snapshot so we can detect a no-op save and
+// just close the modal instead of round-tripping the server.
+let adminEditInitial = null;
+function snapshotAdminEditForm(resource) {
+  if (resource === "retailers") return JSON.stringify({
+    id: $("ae_id")?.value, name: $("ae_name")?.value, kind: $("ae_kind")?.value,
+    color: $("ae_color")?.value, online_url: $("ae_online_url_template")?.value,
+    is_default: $("ae_is_default")?.checked
+  });
+  if (resource === "products") return JSON.stringify({
+    name: $("ae_name")?.value, notes: $("ae_notes")?.value,
+    brand: $("ae_default_brand")?.value, size: $("ae_default_size")?.value,
+    qty: $("ae_default_quantity")?.value, notes2: $("ae_default_notes")?.value,
+    tags: $("ae_default_tags")?.value, retailer: $("ae_default_retailer_id")?.value
+  });
+  if (resource === "locations") return JSON.stringify({
+    aisle: $("ae_aisle_id")?.value, price: $("ae_indicative_price")?.value
+  });
+  return "";
+}
+
 $("adminEditSave").addEventListener("click", async () => {
   if (!adminEditing) return;
   const { resource, row } = adminEditing;
   const isNew = !row || !row.id;
+
+  // No-op save: if nothing changed since the form opened, just close.
+  if (!isNew && adminEditInitial != null && snapshotAdminEditForm(resource) === adminEditInitial) {
+    $("adminEditModal").classList.remove("open");
+    return;
+  }
+
   let body = {};
   if (resource === "retailers") {
     body = {
@@ -1914,7 +2104,6 @@ $("adminEditSave").addEventListener("click", async () => {
     };
     if (!body.id || !body.name) { alert("ID and Name are required."); return; }
   } else if (resource === "products") {
-    const priceVal = $("ae_default_price").value.trim();
     body = {
       name: $("ae_name").value.trim(),
       notes: $("ae_notes").value.trim() || null,
@@ -1924,7 +2113,6 @@ $("adminEditSave").addEventListener("click", async () => {
       default_notes: $("ae_default_notes").value.trim() || null,
       default_tags: parseTags($("ae_default_tags").value).join(", ") || null,
       default_retailer_id: $("ae_default_retailer_id").value || null,
-      default_price: priceVal === "" ? null : parseFloat(priceVal),
     };
     if (!body.name) { alert("Name is required."); return; }
     if (!isNew) body.id = row.id;
@@ -1940,10 +2128,22 @@ $("adminEditSave").addEventListener("click", async () => {
 
   try {
     const method = isNew ? "POST" : "PATCH";
-    await api(`/api/admin/${resource}`, { method, body });
+    const r = await api(`/api/admin/${resource}`, { method, body });
     $("adminEditModal").classList.remove("open");
     await refreshAll();
-    renderAdminTab();
+    // After creating a NEW product, drop the user straight into the
+    // Catalog tab with that product selected so they can wire up its
+    // per-retailer locations without hunting.
+    if (isNew && resource === "products" && r.id) {
+      adminTab = "catalog";
+      document.querySelectorAll(".admin-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "catalog"));
+      renderAdminTab();
+      // Then auto-select the new product in the catalog picker
+      const sel = $("adminBody").querySelector("select");
+      if (sel) { sel.value = r.id; sel.dispatchEvent(new Event("change")); }
+    } else {
+      renderAdminTab();
+    }
     toast(isNew ? "Created" : "Saved");
   } catch (err) { alert("Save failed: " + err.message); }
 });

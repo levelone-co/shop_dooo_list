@@ -74,14 +74,15 @@ CREATE INDEX idx_products_name ON products(name COLLATE NOCASE);
 -- product_locations — the matrix (which aisle at which retailer, what price)
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE product_locations (
-  id               TEXT PRIMARY KEY,
-  product_id       TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-  retailer_id      TEXT NOT NULL REFERENCES retailers(id) ON DELETE CASCADE,
-  aisle_id         TEXT REFERENCES aisles(id) ON DELETE SET NULL,
-  indicative_price REAL,
-  is_primary       INTEGER NOT NULL DEFAULT 0,  -- if 1, this retailer is the "default" for the product
-  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  id                          TEXT PRIMARY KEY,
+  product_id                  TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  retailer_id                 TEXT NOT NULL REFERENCES retailers(id) ON DELETE CASCADE,
+  aisle_id                    TEXT REFERENCES aisles(id) ON DELETE SET NULL,
+  indicative_price            REAL,
+  indicative_price_updated_at TEXT,                       -- ISO ts, auto-set when price changes
+  is_primary                  INTEGER NOT NULL DEFAULT 0, -- if 1, this retailer is the "default" for the product
+  created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at                  TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (product_id, retailer_id)
 );
 CREATE INDEX idx_locations_product ON product_locations(product_id);
