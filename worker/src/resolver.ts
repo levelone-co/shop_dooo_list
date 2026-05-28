@@ -161,14 +161,16 @@ async function aiResolve(
     "Given a user's raw input, return ONE of three actions:\n" +
     "  • match  — the item maps to an EXISTING product in the catalog below. Return its product_id.\n" +
     "  • create — the item is clearly a real, common product but the catalog is missing it. " +
-                "Return a sensible canonical name (Title Case, singular form, e.g. \"Soy Milk\" not \"6 Soy Milks\") " +
-                "and your best guess of which retailer typically sells it from the retailer list below.\n" +
+                "Return a sensible canonical name in Title Case (every word capitalised: \"Soy Milk\", not \"Soy milk\"). " +
+                "Use singular form (\"Soy Milk\" not \"Soy Milks\"). Suggest the retailer that typically sells it.\n" +
     "  • skip   — the input is too ambiguous to be sure. The system will route it to a catch-all 'Other'.\n\n" +
     "Rules:\n" +
-    "  • Always strip leading quantity prefixes from the name (\"6 Soy Milks\" → name=\"Soy Milk\", quantity=6).\n" +
-    "  • Singular form for canonical names — \"Eggs\" stays plural where conventional, otherwise drop the trailing s.\n" +
-    "  • For an in-store retailer, you can suggest an aisle_id ONLY if you're confident; otherwise leave it blank.\n" +
-    "  • Be conservative with create: only when you'd bet money this is a real product.\n\n" +
+    "  • QUANTITY: leading numbers ALWAYS mean quantity, NEVER pack size. \"6 Soy Milks\" → quantity=6 (six separate units). " +
+                "If the user means a multi-pack they'll say it explicitly (\"a 6 pack of soy milk\"). If a prefix-parser " +
+                "already extracted a quantity (the user message will tell you so), echo that number verbatim.\n" +
+    "  • NAMING: Title Case, every word capitalised, singular form. \"Eggs\" stays plural only where the singular looks wrong.\n" +
+    "  • RETAILER: pick the retailer slug from the list. For an in-store retailer, suggest aisle_id ONLY if confident.\n" +
+    "  • CREATE conservatively: only when you'd bet money this is a real, common product.\n\n" +
     "Catalog (product_id: name):\n" + catalogText + "\n\n" +
     "Retailers (id: name):\n" + retailerText;
 
@@ -218,6 +220,17 @@ function smartTitleCase(s: string): string {
   const allUpper = t === t.toUpperCase();
   if (!allLower && !allUpper) return t;
   return t.toLowerCase().replace(/(^|[\s\-'])(\p{L})/gu, (_m, sep, ch) => sep + ch.toUpperCase());
+}
+
+/**
+ * Strict Title Case — capitalises the first letter of EVERY word, regardless
+ * of the input's existing case. Used for AI-generated names so "Soy milk"
+ * always becomes "Soy Milk". For brand-style mixed case (NikNaks, CR2032)
+ * we trust the catalog seed / human admin entry instead.
+ */
+function strictTitleCase(s: string): string {
+  if (!s) return s;
+  return s.trim().toLowerCase().replace(/(^|[\s\-'])(\p{L})/gu, (_m, sep, ch) => sep + ch.toUpperCase());
 }
 
 /**
@@ -276,13 +289,15 @@ export async function resolveItem(env: ResolverEnv, rawInput: string): Promise<R
     return { name: cleanedName, quantity: qty, source: "strict-fallback" };
   }
 
-  // 4a) AI: match → look up the suggested product and use its defaults
+  // 4a) AI: match → look up the suggested product and use its defaults.
+  //     Prefix-parsed quantity always wins — the AI shouldn't override an
+  //     explicit "6 …" the user said.
   if (ai.action === "match" && ai.product_id) {
     const matched = await env.DB.prepare(STRICT_SQL.replace("LOWER(p.name) = LOWER(?)", "p.id = ?"))
       .bind(ai.product_id).first<StrictMatch>();
     if (matched) {
       return {
-        quantity: ai.quantity ?? qty,
+        quantity: qty ?? ai.quantity,
         name: matched.canonical_name,
         product_id: matched.product_id,
         retailer_id: ai.retailer_id ?? matched.default_retailer_id ?? matched.loc_retailer_id ?? null,
@@ -297,9 +312,10 @@ export async function resolveItem(env: ResolverEnv, rawInput: string): Promise<R
     // Fall through to skip if the LLM picked a stale id
   }
 
-  // 4b) AI: create → spawn a new product with review_status="pending"
+  // 4b) AI: create → spawn a new product with review_status="pending".
+  //     Strict Title Case on AI names: "Soy milk" → "Soy Milk" always.
   if (ai.action === "create" && ai.name) {
-    const canonical = smartTitleCase(ai.name);
+    const canonical = strictTitleCase(ai.name);
     // Belt-and-braces: re-check the catalog for an exact match — the LLM may
     // hallucinate a "create" when the product already exists.
     const dup = await strictExact(env, canonical);
