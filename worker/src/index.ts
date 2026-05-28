@@ -545,7 +545,7 @@ const ADMIN_SCHEMA: Record<string, { table: string; fields: string[]; defaultIdP
   },
   products: {
     table: "products",
-    fields: ["id", "name", "brand", "notes"],
+    fields: ["id", "name", "brand", "notes", "default_brand", "default_size"],
     defaultIdPrefix: "prod-",
   },
   aisles: {
