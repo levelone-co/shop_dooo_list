@@ -2247,8 +2247,17 @@ $("adminEditSave").addEventListener("click", async () => {
   const isNew = !row || !row.id;
 
   // No-op save: if nothing changed since the form opened, just close.
+  // EXCEPT for products — the user wants Save to ALWAYS land on the Catalog
+  // tab so they can continue wiring up retailers, change or not.
   if (!isNew && adminEditInitial != null && snapshotAdminEditForm(resource) === adminEditInitial) {
     $("adminEditModal").classList.remove("open");
+    if (resource === "products" && row?.id) {
+      adminTab = "catalog";
+      document.querySelectorAll(".admin-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "catalog"));
+      renderAdminTab();
+      const sel = $("adminBody").querySelector("select");
+      if (sel) { sel.value = row.id; sel.dispatchEvent(new Event("change")); }
+    }
     return;
   }
 
