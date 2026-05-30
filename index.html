@@ -788,7 +788,7 @@
 </main>
 
 <footer class="app-footer">
-  Shop Wise · <span id="appVersion">v2.9</span> · cloud-backed
+  Shop Wise · <span id="appVersion">v3.0</span> · cloud-backed
 </footer>
 
 <button class="reload-fab" id="reloadFab" aria-label="Reload">↻</button>
@@ -970,11 +970,19 @@ async function boot() {
 async function refreshAll() {
   state.loading = true;
   render();
+  // Without a token every read now returns 401 — surface the config banner
+  // up front instead of letting fetches fire and fail.
+  if (!config.token) {
+    state.loading = false;
+    render();
+    showConfigBanner("Set your API token in ⚙️ Settings to load your catalog + list.");
+    return;
+  }
   try {
     const [retailersR, catalogR, listR] = await Promise.all([
-      api("/api/retailers", { auth: false }),
-      api("/api/catalog", { auth: false }),
-      api("/api/list", { auth: false }),
+      api("/api/retailers"),
+      api("/api/catalog"),
+      api("/api/list"),
     ]);
     state.retailers = retailersR.retailers || [];
     state.catalog = catalogR.catalog || [];
@@ -1045,7 +1053,7 @@ function rebuildCatalogIndex() {
 async function ensureAislesFor(retailerId) {
   if (!retailerId) return [];
   if (state.aislesByRetailer.has(retailerId)) return state.aislesByRetailer.get(retailerId);
-  const r = await api("/api/aisles?retailer=" + encodeURIComponent(retailerId), { auth: false });
+  const r = await api("/api/aisles?retailer=" + encodeURIComponent(retailerId));
   const aisles = r.aisles || [];
   state.aislesByRetailer.set(retailerId, aisles);
   return aisles;
@@ -1543,7 +1551,7 @@ function toggleShopping() {
 
 async function refreshList() {
   try {
-    const r = await api("/api/list", { auth: false });
+    const r = await api("/api/list");
     state.items = r.items || [];
     render();
   } catch (err) { /* ignore */ }
@@ -1990,7 +1998,7 @@ function renderAdminRetailers(body) {
 async function renderAdminProducts(body) {
   // Pending-review section (AI auto-created products awaiting human curate)
   try {
-    const r = await api("/api/admin/review/pending", { auth: false });
+    const r = await api("/api/admin/review/pending");
     if (r.products && r.products.length) {
       const sec = document.createElement("div");
       sec.className = "review-section";
@@ -2631,7 +2639,7 @@ let pollTimer = null;
 async function checkVersion() {
   if (document.visibilityState !== "visible") return;
   try {
-    const r = await api("/api/list/version", { auth: false });
+    const r = await api("/api/list/version");
     if (r && r.v && r.v !== lastVersion) {
       lastVersion = r.v;
       await refreshList();

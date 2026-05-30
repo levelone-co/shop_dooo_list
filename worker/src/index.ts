@@ -60,28 +60,24 @@ async function route(req: Request, env: Env, url: URL): Promise<Response> {
   const p = url.pathname;
   const m = req.method;
 
+  // Truly-open routes (no auth):
+  //   • health checks — useful for monitoring + the user knowing the
+  //     Worker is alive
+  //   • the from-pre-do GET redirect — Pre-Do stores this URL as the
+  //     action's "Open" link, so a browser visit must succeed without
+  //     a token (we 302 the user into the live app, where the app's
+  //     own token then takes over)
   if (p === "/" || p === "/api" || p === "/api/health") {
     return jsonResp({ ok: true, service: "shop-wise-api", version: "1.0.0" }, env);
   }
-
-  // Pre-Do uses the endpoint URL as the action's `url` field — clicking
-  // "Open" in Pre-Do GETs the URL in a browser. Redirect those to the app
-  // so users land on the live list instead of seeing a 401 JSON page.
   if (m === "GET" && p === "/api/from-pre-do") {
     return Response.redirect("https://shop-wise.pages.dev/?from=predo", 302);
   }
 
-  // ─── Read routes (open) ───
-  if (m === "GET" && p === "/api/retailers")        return getRetailers(env);
-  if (m === "GET" && p === "/api/aisles")           return getAisles(env, url);
-  if (m === "GET" && p === "/api/catalog")          return getCatalog(env, url);
-  if (m === "GET" && p === "/api/list")             return getList(env, url);
-  if (m === "GET" && p === "/api/list/version")     return getListVersion(env);
-  if (m === "GET" && p === "/api/products/lookup")  return lookupProduct(env, url);
-
-  // ─── Pre-Do ingest: token may come in body (its existing format) ───
+  // Everything else — including reads — now requires the bearer token.
+  // The Pre-Do POST has its own auth dance (token may arrive in the body
+  // rather than the header), so route to it before the generic check.
   if (m === "POST" && p === "/api/from-pre-do") {
-    // Clone so the handler can still consume the body.
     const cloned = req.clone();
     const body = await readJson(cloned).catch(() => ({}));
     const bodyToken = (body && typeof body === "object" && "token" in body) ? String(body.token) : "";
@@ -91,10 +87,16 @@ async function route(req: Request, env: Env, url: URL): Promise<Response> {
     }
     return fromPreDo(req, env);
   }
-
-  // ─── All other writes require Bearer header ───
   const authError = checkAuth(req, env);
   if (authError) return authError;
+
+  // ─── Read routes (token required) ───
+  if (m === "GET" && p === "/api/retailers")        return getRetailers(env);
+  if (m === "GET" && p === "/api/aisles")           return getAisles(env, url);
+  if (m === "GET" && p === "/api/catalog")          return getCatalog(env, url);
+  if (m === "GET" && p === "/api/list")             return getList(env, url);
+  if (m === "GET" && p === "/api/list/version")     return getListVersion(env);
+  if (m === "GET" && p === "/api/products/lookup")  return lookupProduct(env, url);
 
   // List ops
   if (m === "POST" && p === "/api/list/add")              return listAdd(req, env);
