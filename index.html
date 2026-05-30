@@ -570,6 +570,18 @@
   }
   .legend span { display: inline-flex; align-items: center; gap: 4px; }
   .legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .finder-notes {
+    flex: 1;
+    font-size: 12px;
+    font-style: italic;
+    color: var(--muted);
+    background: var(--map-bg);
+    padding: 6px 10px;
+    border-radius: 6px;
+    border-left: 3px solid var(--green);
+    line-height: 1.4;
+  }
+  .finder-notes:empty { display: none; }
   .no-map-msg {
     padding: 24px; text-align: center; color: var(--muted);
     background: var(--map-bg); border-radius: 10px;
@@ -776,7 +788,7 @@
 </main>
 
 <footer class="app-footer">
-  Shop Wise · <span id="appVersion">v2.8</span> · cloud-backed
+  Shop Wise · <span id="appVersion">v2.9</span> · cloud-backed
 </footer>
 
 <button class="reload-fab" id="reloadFab" aria-label="Reload">↻</button>
@@ -798,7 +810,10 @@
         <span><span class="dot" style="background:#f59e0b"></span>Walking route</span>
       </div>
     </div>
-    <button class="secondary" id="finderClose">Close</button>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <button class="secondary" id="finderClose">Close</button>
+      <span id="finderNotes" class="finder-notes"></span>
+    </div>
   </div>
 </div>
 
@@ -815,6 +830,10 @@
     <input id="editVariant" type="text" list="editVariantList" placeholder="e.g. Long Life, Full Cream, Original" autocomplete="off" />
     <datalist id="editVariantList"></datalist>
 
+    <label for="editBrand">Brand</label>
+    <input id="editBrand" type="text" list="editBrandList" placeholder="e.g. Phillips, Tastic, —" autocomplete="off" />
+    <datalist id="editBrandList"></datalist>
+
     <label for="editSize">Size / pack</label>
     <input id="editSize" type="text" list="editSizeList" placeholder="e.g. 1kg, 4 pack, 1 bag" autocomplete="off" />
     <datalist id="editSizeList"></datalist>
@@ -825,10 +844,6 @@
       <input id="editQty" type="number" min="1" step="1" value="1" style="text-align:center;flex:0 0 80px;" />
       <button type="button" class="secondary" id="qtyPlus" style="width:44px;padding:8px;">+</button>
     </div>
-
-    <label for="editBrand">Brand</label>
-    <input id="editBrand" type="text" list="editBrandList" placeholder="e.g. Phillips, Tastic, —" autocomplete="off" />
-    <datalist id="editBrandList"></datalist>
 
     <label for="editTags">Tags (comma separated)</label>
     <input id="editTags" type="text" placeholder="e.g. sixty60, no-stock 2026-05-17" />
@@ -1003,21 +1018,28 @@ function toast(msg, duration = 1500) {
 }
 
 function rebuildCatalogIndex() {
+  // One entry per PRODUCT — variants/brands/sizes that share a name remain
+  // as distinct suggestions. Prefer the primary location for retailer/aisle.
   const map = new Map();
   for (const c of state.catalog) {
-    const key = c.name.toLowerCase();
-    const existing = map.get(key);
-    // Prefer primary location, otherwise first encountered.
-    if (!existing || c.is_primary) {
-      map.set(key, {
-        name: c.name,
+    if (!map.has(c.product_id)) {
+      map.set(c.product_id, {
         product_id: c.product_id,
+        name: c.name,
+        variant: c.variant || null,
+        brand: c.default_brand || null,
+        size: c.default_size || null,
         retailer_id: c.retailer_id,
         aisle_id: c.aisle_id,
+        is_primary: !!c.is_primary,
       });
+    } else if (c.is_primary) {
+      const cur = map.get(c.product_id);
+      cur.retailer_id = c.retailer_id;
+      cur.aisle_id = c.aisle_id;
     }
   }
-  state.catalogByName = map;
+  state.catalogByName = map;  // keyed by product_id now (despite the legacy name)
 }
 
 async function ensureAislesFor(retailerId) {
@@ -1203,11 +1225,9 @@ function renderItem(it, retailer, hasAisle) {
     extras.push(`<span class="tag-chip${isWarn ? " warn" : ""}">${escapeHtml(t)}</span>`);
   }
   const metaParts = [];
-  if (it.brand)         metaParts.push(escapeHtml(it.brand));
-  if (it.variant)       metaParts.push(escapeHtml(it.variant));
-  if (it.size)          metaParts.push(escapeHtml(it.size));
-  // Product-level notes (curator hint that applies to every instance).
-  if (it.product_notes) metaParts.push(escapeHtml(it.product_notes));
+  if (it.brand)   metaParts.push(escapeHtml(it.brand));
+  if (it.variant) metaParts.push(escapeHtml(it.variant));
+  if (it.size)    metaParts.push(escapeHtml(it.size));
   if (metaParts.length) {
     extras.push(`<span class="meta-text">${metaParts.join('<span class="sep">·</span>')}</span>`);
   }
@@ -1217,6 +1237,10 @@ function renderItem(it, retailer, hasAisle) {
     ? `<div class="check" data-id="${it.id}">${it.checked ? "✓" : ""}</div>` : "";
   const delEl = state.shopping
     ? "" : `<button class="del-btn" data-del="${it.id}" aria-label="Delete">✕</button>`;
+
+  // Product notes are a curator hint — hidden from the meta line but exposed
+  // on hover (browser tooltip) and inside the Finder modal in shopping mode.
+  if (it.product_notes) row.title = it.product_notes;
 
   row.innerHTML = `
     ${checkEl}
@@ -1269,17 +1293,21 @@ function catalogProducts() {
   return [...state.catalogByName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function searchableLabel(c) {
+  return [c.name, c.variant, c.brand, c.size].filter(Boolean).join(" ").toLowerCase();
+}
+
 function rankMatches(q) {
   const lq = q.trim().toLowerCase();
   if (!lq) return [];
   const all = catalogProducts();
   const starts = [], contains = [];
   for (const c of all) {
-    const ln = c.name.toLowerCase();
-    if (ln.startsWith(lq)) starts.push(c);
-    else if (ln.includes(lq)) contains.push(c);
+    const label = searchableLabel(c);
+    if (label.startsWith(lq) || c.name.toLowerCase().startsWith(lq)) starts.push(c);
+    else if (label.includes(lq)) contains.push(c);
   }
-  return [...starts, ...contains].slice(0, 6);
+  return [...starts, ...contains].slice(0, 8);
 }
 
 function renderSuggestions(matches, query) {
@@ -1289,9 +1317,10 @@ function renderSuggestions(matches, query) {
     const div = document.createElement("div");
     div.className = "suggestion" + (i === activeSugg ? " active" : "");
     div.dataset.name = m.name;
+    div.dataset.productId = m.product_id || "";
     const retailer = state.retailers.find(r => r.id === m.retailer_id);
-    const retailerLabel = retailer ? retailer.name : "";
-    div.innerHTML = `<span class="prod">${highlightMatch(m.name, query)}</span><span class="ais">${escapeHtml(retailerLabel)}</span>`;
+    const sub = [m.variant, m.brand, m.size, retailer?.name].filter(Boolean).join(" · ");
+    div.innerHTML = `<span class="prod">${highlightMatch(m.name, query)}</span><span class="ais">${escapeHtml(sub)}</span>`;
     suggBox.appendChild(div);
   });
   suggBox.classList.add("open");
@@ -1380,7 +1409,7 @@ function selectSuggestion(e) {
   const s = e.target.closest(".suggestion");
   if (!s) return;
   e.preventDefault();
-  addItem(s.dataset.name).then(ok => {
+  addItem(s.dataset.name, s.dataset.productId || null).then(ok => {
     if (ok) { inputEl.value = ""; lastTyped = ""; activeSugg = -1; suggBox.classList.remove("open"); inputEl.focus(); }
   });
 }
@@ -1401,7 +1430,7 @@ $("chevronBtn").addEventListener("pointerdown", toggleChevron);
 $("chevronBtn").addEventListener("mousedown", toggleChevron);
 
 /* ============ Item actions (server-backed) ============ */
-async function addItem(query) {
+async function addItem(query, productId) {
   if (!query) return false;
   const trimmed = query.trim();
   if (!trimmed) return false;
@@ -1414,7 +1443,9 @@ async function addItem(query) {
     // Server merges duplicates by incrementing quantity. No client-side dedupe.
     // Track the qty BEFORE the add so undo can restore it (rather than delete).
     const beforeQty = state.items.find(i => i.name.toLowerCase() === trimmed.toLowerCase())?.quantity ?? 0;
-    const r = await api("/api/list/add", { method: "POST", body: { name: trimmed } });
+    const body = { name: trimmed };
+    if (productId) body.product_id = productId;
+    const r = await api("/api/list/add", { method: "POST", body });
     state.lastAction = { kind: "add", id: r.id, prevQty: beforeQty };
     await refreshList();
     // Toast with canonical name from the server response (after refresh state.items has the row)
@@ -1805,6 +1836,7 @@ async function openFinder(itemId) {
   const retailer = state.retailers.find(r => r.id === it.retailer_id);
   const retailerName = retailer?.name || "Unknown";
   $("finderLoc").textContent = `📍 ${retailerName} · ${it.aisle_name || "?"}${it.aisle_sub ? " — " + it.aisle_sub : ""}`;
+  $("finderNotes").textContent = it.product_notes ? `📝 ${it.product_notes}` : "";
 
   const body = $("finderBody");
   if (!it.aisle_id || !it.retailer_id || retailer?.kind === "online") {
@@ -1866,7 +1898,13 @@ let adminTab = "products";
 let adminEditing = null; // { resource: "retailers"|"products"|"locations", row: {...} | null (new) }
 
 $("settingsBtn").addEventListener("click", openAdmin);
-$("adminClose").addEventListener("click", () => $("adminModal").classList.remove("open"));
+$("adminClose").addEventListener("click", () => {
+  // Reset modal state on close so search/scroll/active-row don't persist.
+  $("adminModal").classList.remove("open");
+  $("adminBody").innerHTML = "";
+  adminTab = "products";   // default tab on next open
+  document.querySelectorAll(".admin-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "products"));
+});
 document.querySelectorAll(".admin-tab").forEach(t => {
   t.addEventListener("click", () => {
     adminTab = t.dataset.tab;
@@ -2351,12 +2389,12 @@ async function openAdminEdit(resource, row) {
       <input id="ae_name" type="text" value="${escapeAttr(row?.name || "")}" />
       <label>Variant</label>
       <input id="ae_variant" type="text" value="${escapeAttr(row?.variant || "")}" placeholder="e.g. Long Life, Full Cream, Original" />
+      <label>Default brand</label>
+      <input id="ae_default_brand" type="text" value="${escapeAttr(row?.default_brand || "")}" placeholder="(blank = no default)" />
       <label>Default size / pack</label>
       <input id="ae_default_size" type="text" value="${escapeAttr(row?.default_size || "")}" placeholder="e.g. 1kg, 4 pack" />
       <label>Default quantity</label>
       <input id="ae_default_quantity" type="number" min="1" step="1" value="${row?.default_quantity || ""}" placeholder="1" />
-      <label>Default brand</label>
-      <input id="ae_default_brand" type="text" value="${escapeAttr(row?.default_brand || "")}" placeholder="(blank = no default)" />
       <label>Default tags</label>
       <input id="ae_default_tags" type="text" value="${escapeAttr(row?.default_tags || "")}" placeholder="comma-separated, e.g. sixty60" />
       <label>Internal product notes</label>

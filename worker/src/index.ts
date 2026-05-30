@@ -173,6 +173,26 @@ function nowIso(): string {
 }
 
 /**
+ * Normalise a "size / pack" string: lowercase, any non-alphanumeric (except
+ * period for decimals) becomes a space, multi-space collapsed, trimmed.
+ *   "5 Pack"      → "5 pack"
+ *   "1.5L"        → "1.5l"
+ *   "6 x 1L"      → "6 x 1l"
+ *   "3-Pack"      → "3 pack"
+ *   "20m x 450mm" → "20m x 450mm"
+ *   ""            → null
+ */
+function normalizeSize(s: string | null | undefined): string | null {
+  if (!s) return null;
+  const out = String(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return out || null;
+}
+
+/**
  * Smart Title Case for arriving product names.
  *  - "tastic rice"  → "Tastic Rice"
  *  - "TASTIC RICE"  → "Tastic Rice"
@@ -320,6 +340,7 @@ async function lookupProduct(env: Env, url: URL): Promise<Response> {
  */
 async function addItemToList(env: Env, opts: {
   name: string;
+  productId?: string;            // if set, skip name-based resolver and use this product directly
   quantity?: number;
   retailerId?: string | null;
   aisleId?: string | null;
@@ -335,10 +356,34 @@ async function addItemToList(env: Env, opts: {
   sourceInboxId?: string | null;
   retailerOverride?: boolean;  // if true, don't fall back to product's default retailer
 }): Promise<{ id: string; merged: boolean; quantity: number }> {
-  // Strict-first, AI-fallback resolver. Returns a normalized name, any
-  // quantity it extracted, a possibly-matched product_id, and default
-  // retailer/aisle/brand/size/tags/notes from the catalog or LLM.
-  const resolved = await resolveItem(env, opts.name);
+  // When the caller picked an exact product (e.g. autocomplete on the list
+  // input), look that up directly and skip the name/AI resolver. Otherwise
+  // run the strict-first, AI-fallback resolver.
+  let resolved;
+  if (opts.productId) {
+    const row = await env.DB.prepare(
+      `SELECT p.id AS product_id, p.name AS canonical_name, p.variant,
+              p.default_brand, p.default_size, p.default_tags, p.default_retailer_id,
+              l.retailer_id AS loc_retailer_id, l.aisle_id AS loc_aisle_id
+       FROM products p
+       LEFT JOIN product_locations l ON l.product_id = p.id AND l.is_primary = 1
+       WHERE p.id = ?
+       LIMIT 1`
+    ).bind(opts.productId).first<any>();
+    if (row) {
+      resolved = {
+        name: row.canonical_name,
+        product_id: row.product_id,
+        retailer_id: row.default_retailer_id || row.loc_retailer_id || null,
+        aisle_id: row.loc_aisle_id ?? null,
+        variant: row.variant ?? null,
+        brand:   row.default_brand ?? null,
+        size:    row.default_size  ?? null,
+        tags:    row.default_tags  ?? null,
+      } as any;
+    }
+  }
+  if (!resolved) resolved = await resolveItem(env, opts.name);
   const name = resolved.name;
   const addQty = Math.max(1, opts.quantity || resolved.quantity || 1);
   const now = nowIso();
@@ -367,7 +412,7 @@ async function addItemToList(env: Env, opts: {
   if (opts.fulfilmentMode === "online") aisleId = null;
 
   const brand   = opts.brand   !== undefined ? opts.brand   : (resolved.brand   ?? null);
-  const size    = opts.size    !== undefined ? opts.size    : (resolved.size    ?? null);
+  const size    = normalizeSize(opts.size !== undefined ? opts.size : (resolved.size ?? null));
   const tags    = opts.tags    !== undefined ? opts.tags    : (resolved.tags    ?? null);
   const variant = opts.variant !== undefined ? opts.variant : (resolved.variant ?? null);
 
@@ -417,13 +462,13 @@ async function listAdd(req: Request, env: Env): Promise<Response> {
   if (!name) return jsonResp({ ok: false, error: "name required" }, env, 400);
   const result = await addItemToList(env, {
     name,
+    productId: body.product_id as string | undefined,
     quantity: body.quantity as number | undefined,
     retailerId: body.retailerId as string | undefined,
     aisleId: body.aisleId as string | undefined,
     variant: body.variant as string | undefined,
     brand: body.brand as string | undefined,
     size: body.size as string | undefined,
-    notes: body.notes as string | undefined,
     tags: body.tags as string | undefined,
     fulfilmentMode: (body.fulfilmentMode as "in_store" | "online" | undefined),
     onlineOrderLink: body.onlineOrderLink as string | undefined,
@@ -473,6 +518,7 @@ async function listUpdate(req: Request, env: Env): Promise<Response> {
       let v = body[k];
       if (k === "checked") v = v ? 1 : 0;
       if (k === "name" && typeof v === "string") v = smartTitleCase(v);
+      if (k === "size" && typeof v === "string") v = normalizeSize(v);
       binds.push(v);
     }
   }
@@ -622,6 +668,11 @@ async function adminCreate(req: Request, env: Env, resource: string): Promise<Re
   if (resource === "locations" && "indicative_price" in body && !("indicative_price_updated_at" in body)) {
     body.indicative_price_updated_at = body.indicative_price == null ? null : nowIso();
   }
+  // Size normalisation on products: silently coerce to lowercase + clean
+  // spacing. No error if the user typed mixed case.
+  if (resource === "products" && "default_size" in body) {
+    body.default_size = normalizeSize(body.default_size as string | null);
+  }
 
   // Locations have a UNIQUE (product_id, retailer_id) constraint. If a row
   // already exists for the pair, update it in place instead of throwing
@@ -688,6 +739,9 @@ async function adminUpdate(req: Request, env: Env, resource: string): Promise<Re
   }
   if (resource === "locations" && "indicative_price" in body && !("indicative_price_updated_at" in body)) {
     body.indicative_price_updated_at = body.indicative_price == null ? null : nowIso();
+  }
+  if (resource === "products" && "default_size" in body) {
+    body.default_size = normalizeSize(body.default_size as string | null);
   }
 
   return await applyAdminUpdate(env, def, resource, body);
