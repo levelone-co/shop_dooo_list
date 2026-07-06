@@ -18,9 +18,24 @@ export interface Env {
   RESOLVER_MODEL?: string;        // default "deepseek-chat"
   PRICE_CHECK_MODE?: string;      // "on" | "off"
   PRICE_REFRESH_DAYS?: string;    // e.g. "30"
+  ERRORS?: AnalyticsEngineDataset; // suite-wide error telemetry (optional)
 }
 
 type Json = Record<string, unknown> | unknown[];
+
+// Suite-wide error telemetry → Cloudflare Analytics Engine. No-ops if the ERRORS
+// binding is absent, so it can never break a request. Mirrors dooo-api/observ.ts.
+function reportError(env: Env, where: string, err: unknown, meta: Record<string, string> = {}): void {
+  const message = err instanceof Error ? err.message : String(err);
+  try {
+    env.ERRORS?.writeDataPoint({
+      indexes: ["shop-dooo-api"],
+      blobs: [where, message.slice(0, 200), meta.path || ""],
+      doubles: [1],
+    });
+  } catch { /* never let telemetry throw */ }
+  console.error(`[shop-dooo-api] ${where}: ${message}`, meta);
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -33,6 +48,7 @@ export default {
     try {
       return await route(request, env, url);
     } catch (err) {
+      reportError(env, "fetch", err, { path: url.pathname });
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResp({ ok: false, error: msg }, env, 500);
     }
@@ -47,7 +63,7 @@ export default {
         const r = await checkPrices(env);
         console.log("price-check tick:", JSON.stringify(r));
       } catch (e) {
-        console.error("price-check tick failed:", e);
+        reportError(env, "cron.checkPrices", e);
       }
     })());
   }

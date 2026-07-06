@@ -1,4 +1,4 @@
-name = "shop-wise-api"
+name = "shop-dooo-api"
 main = "src/index.ts"
 compatibility_date = "2024-09-01"
 compatibility_flags = ["nodejs_compat"]
@@ -16,6 +16,13 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "shopwise"
 database_id = "b820ea69-9235-4a35-afa7-2f5de33ef756"
+
+# Error telemetry currently goes to Worker logs via reportError(). To upgrade to a
+# queryable Analytics Engine dataset later: enable Analytics Engine on the account,
+# then uncomment:
+#   [[analytics_engine_datasets]]
+#   binding = "ERRORS"
+#   dataset = "dooo_errors"
 
 [vars]
 # Public, non-secret env vars go here.

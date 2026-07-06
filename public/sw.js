@@ -1,9 +1,19 @@
 const CACHE = "shopwise-v39";
-const ASSETS = ["./", "./index.html", "./manifest.json", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-192.svg"];
+const ASSETS = [
+  "./", "./index.html", "./manifest.json",
+  "./icons/icon-192.svg", "./icons/icon-512.svg",
+  "./sync-bridge.js",
+  "./vendor/dooo-core/index.js",
+  "./vendor/dooo-core/sync-engine.js",
+  "./vendor/dooo-core/idb.js",
+  "./vendor/dooo-core/queue.js",
+  "./vendor/dooo-core/dedup.js",
+  "./vendor/dooo-core/transports.js",
+];
 
 // Hostnames the SW must NEVER intercept (so the network always sees the request
 // and the browser uses normal HTTP caching). The Shop Wise API is one of these.
-const PASSTHROUGH_HOSTS = ["shop-wise-api.apps-8ec.workers.dev", "workers.dev"];
+const PASSTHROUGH_HOSTS = ["shop-dooo-api.apps-8ec.workers.dev", "workers.dev"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).catch(() => {}));
@@ -16,6 +26,18 @@ self.addEventListener("activate", (e) => {
       Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
     ).then(() => self.clients.claim())
   );
+});
+
+// Background Sync: replay offline list mutations when connectivity returns,
+// even if the app was closed. Wakes any open client to drain the outbox
+// (sync-bridge.js listens); otherwise the next app open drains it.
+self.addEventListener("sync", (e) => {
+  if (e.tag === "dooo-sync") {
+    e.waitUntil(
+      self.clients.matchAll({ includeUncontrolled: true, type: "window" })
+        .then(clients => clients.forEach(c => c.postMessage({ type: "dooo-sync" })))
+    );
+  }
 });
 
 self.addEventListener("fetch", (e) => {

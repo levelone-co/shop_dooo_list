@@ -929,7 +929,7 @@ const $ = id => document.getElementById(id);
 /* ============ Config (persisted) ============ */
 const CONFIG_KEY = "shopwise.config.v1";
 const THEME_KEY = "shopwise.theme";
-const DEFAULT_API = "https://shop-wise-api.apps-8ec.workers.dev";
+const DEFAULT_API = "https://shop-dooo-api.apps-8ec.workers.dev";
 
 function loadConfig() {
   try {
@@ -955,6 +955,13 @@ async function api(path, opts = {}) {
     throw new Error(`HTTP ${resp.status}${detail ? ": " + detail : ""}`);
   }
   return resp.json();
+}
+
+// True when an api() error looks like a lost connection (not a server/auth
+// error). Offline mutations are queued durably; server errors keep old behaviour.
+function isOfflineError(err) {
+  if (navigator.onLine === false) return true;
+  return /Failed to fetch|NetworkError|Load failed|network request failed/i.test((err && err.message) || "");
 }
 
 /* ============ State ============ */
@@ -1027,8 +1034,22 @@ async function refreshAll() {
     state.items = listR.items || [];
     rebuildCatalogIndex();
     populateRetailerFilter();
+    // Stage 3: snapshot the last-good server state for offline reads.
+    if (window.ShopSync) window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
   } catch (err) {
-    showConfigBanner("Couldn't reach the server: " + err.message + ". Tap to open settings.");
+    // Offline — hydrate from the saved snapshot so the app opens with your last
+    // list + catalog instead of an empty screen.
+    const snap = window.ShopSync ? await window.ShopSync.loadSnapshot() : null;
+    if (snap) {
+      state.retailers = snap.retailers || [];
+      state.catalog = snap.catalog || [];
+      state.items = snap.items || [];
+      rebuildCatalogIndex();
+      populateRetailerFilter();
+      toast("Offline — showing your saved list", 2000);
+    } else {
+      showConfigBanner("Couldn't reach the server: " + err.message + ". Tap to open settings.");
+    }
   } finally {
     state.loading = false;
     render();
@@ -1539,6 +1560,21 @@ async function addItem(query, productId) {
     else toast(`Added ${displayName}`);
     return true;
   } catch (err) {
+    if (isOfflineError(err) && window.ShopSync) {
+      // Offline: create an optimistic local row (client id) and queue the add.
+      // On reconnect the server assigns the real row; the next refreshList
+      // replaces this placeholder. Server dedups by name so replay is safe.
+      const localId = "local-" + crypto.randomUUID();
+      const item = { id: localId, name: trimmed, quantity: 1, checked: 0, retailer_id: null, aisle_id: null, _local: true };
+      if (productId) item.product_id = productId;
+      state.items.push(item);
+      render();
+      const body = productId ? { name: trimmed, product_id: productId } : { name: trimmed };
+      await window.ShopSync.queueOp("/api/list/add", body);
+      window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
+      toast(`Added ${trimmed} offline — will sync`);
+      return true;
+    }
     toast("Add failed: " + err.message, 2500);
     return false;
   }
@@ -1554,8 +1590,15 @@ async function toggleItem(id) {
   try {
     await api("/api/list/check", { method: "POST", body: { id, checked: !!next } });
   } catch (err) {
-    it.checked = next ? 0 : 1; render();
-    alert("Couldn't update: " + err.message);
+    if (isOfflineError(err) && window.ShopSync) {
+      // Offline: keep the optimistic tick and queue it durably for replay.
+      await window.ShopSync.queueOp("/api/list/check", { id, checked: !!next });
+      window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
+      toast("Saved offline — will sync");
+    } else {
+      it.checked = next ? 0 : 1; render();
+      alert("Couldn't update: " + err.message);
+    }
   }
 }
 
@@ -1567,8 +1610,15 @@ async function deleteItem(id) {
   try {
     await api("/api/list/delete", { method: "POST", body: { id } });
   } catch (err) {
-    state.items = before; render();
-    alert("Delete failed: " + err.message);
+    if (isOfflineError(err) && window.ShopSync) {
+      // Offline: keep the optimistic removal and queue the delete for replay.
+      await window.ShopSync.queueOp("/api/list/delete", { id });
+      window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
+      toast("Removed offline — will sync");
+    } else {
+      state.items = before; render();
+      alert("Delete failed: " + err.message);
+    }
   }
 }
 
@@ -1627,6 +1677,13 @@ async function refreshList() {
     render();
   } catch (err) { /* ignore */ }
 }
+
+// Called by sync-bridge.js after the offline outbox drains on reconnect, so the
+// list reflects the server's canonical rows (replacing any local- placeholders).
+window.onShopDrained = function () {
+  refreshList();
+  if (window.ShopSync) window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
+};
 
 /* ============ Edit item modal ============ */
 let editingItemId = null;
@@ -2808,5 +2865,10 @@ if ("serviceWorker" in navigator) {
   window.parent.postMessage({ v: 1, type: 'config-request', id: id, app: 'shop' }, '*');
 })();
 </script>
+
+<!-- Stage 3: offline snapshot + durable mutation outbox via @dooo/core. Additive
+     — the classic script keeps its online path; only offline reads/mutations use
+     this. Falls back gracefully if IndexedDB is unavailable. -->
+<script type="module" src="/sync-bridge.js"></script>
 </body>
 </html>

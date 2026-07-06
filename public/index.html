@@ -2,13 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<!-- Canonical-origin guard: funnel the raw Pages host → the custom domain so
+     PWA installs/links land on shop.dooolist.com. Top-level only (never inside
+     the dash iframe); preview deploys (<hash>.shop-wise.pages.dev) untouched. -->
+<script>
+  if (window.top === window.self && location.hostname === "shop-wise.pages.dev") {
+    location.replace("https://shop.dooolist.com" + location.pathname + location.search + location.hash);
+  }
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="theme-color" content="#2c7a4b" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="shop dooo" />
 <link rel="manifest" href="manifest.json" />
-<link rel="icon" href="icons/icon-192.svg" type="image/svg+xml" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231f5634'/%3E%3Ctext x='50' y='68' font-size='60' text-anchor='middle' fill='white'%3E%F0%9F%9B%92%3C/text%3E%3C/svg%3E" />
 <link rel="apple-touch-icon" href="icons/icon-192.svg" />
 <title>shop dooo</title>
 <style>
@@ -44,6 +52,19 @@
     --map-bg: #0f1419;
     --modal-overlay: rgba(0,0,0,0.7);
   }
+  /* Dark mode uses a bright lime --green (#4ade80); white text on it is low
+     contrast, so flip on-green text to black. Scoped to the green elements
+     only — danger/warn/secondary/chevron buttons keep their own colors. */
+  [data-theme="dark"] button:not(.secondary):not(.danger):not(.warn):not(.chevron-btn),
+  [data-theme="dark"] .item.checked .check,
+  [data-theme="dark"] .item .qty-badge,
+  [data-theme="dark"] .chip.active,
+  [data-theme="dark"] .search-list-row.selected,
+  [data-theme="dark"] header,
+  [data-theme="dark"] header h1,
+  [data-theme="dark"] header .tagline {
+    color: #000;
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; padding: 0; }
   body {
@@ -76,11 +97,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  header h1 .logo {
-    width: 26px;
-    height: 26px;
-    flex-shrink: 0;
   }
   header .tagline { font-size: 11px; opacity: 0.85; font-weight: 400; line-height: 1.1; }
   header .right { display: flex; align-items: center; gap: 8px; }
@@ -747,9 +763,7 @@
 <body>
 <header>
   <div class="titles">
-    <h1>
-      shop dooo
-    </h1>
+    <h1>shop dooo</h1>
     <div class="tagline">Smarter aisles. Faster trips.</div>
   </div>
   <div class="right">
@@ -798,7 +812,7 @@
 </main>
 
 <footer class="app-footer">
-  shop dooo · <span id="appVersion">v3.5</span> · cloud-backed
+  shop dooo · <span id="appVersion">v0.3.6</span> · cloud-backed
 </footer>
 
 <button class="reload-fab" id="reloadFab" aria-label="Reload">↻</button>
@@ -915,7 +929,7 @@ const $ = id => document.getElementById(id);
 /* ============ Config (persisted) ============ */
 const CONFIG_KEY = "shopwise.config.v1";
 const THEME_KEY = "shopwise.theme";
-const DEFAULT_API = "https://shop-wise-api.apps-8ec.workers.dev";
+const DEFAULT_API = "https://shop-dooo-api.apps-8ec.workers.dev";
 
 function loadConfig() {
   try {
@@ -943,6 +957,13 @@ async function api(path, opts = {}) {
   return resp.json();
 }
 
+// True when an api() error looks like a lost connection (not a server/auth
+// error). Offline mutations are queued durably; server errors keep old behaviour.
+function isOfflineError(err) {
+  if (navigator.onLine === false) return true;
+  return /Failed to fetch|NetworkError|Load failed|network request failed/i.test((err && err.message) || "");
+}
+
 /* ============ State ============ */
 let state = {
   retailers: [],          // [{id, name, color, kind, online_url_template, position, is_default}]
@@ -967,9 +988,23 @@ function applyTheme(theme) {
 function toggleTheme() {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   localStorage.setItem(THEME_KEY, next);
+  // Embedded in dash: our localStorage is partitioned (wiped on iOS reload),
+  // so also persist the choice in the shell's first-party store via the relay.
+  if (_inDash) {
+    try {
+      window.parent.postMessage({ v: 1, type: 'pref-set', key: 'theme', value: next }, '*');
+    } catch (e) {}
+  }
   applyTheme(next);
 }
-applyTheme(localStorage.getItem(THEME_KEY) || "light");
+// Inside dash dooo the iframe's localStorage is partitioned/blocked, so the
+// app's saved theme never sticks. Default to dark immediately (dash's shell is
+// dark — avoids a light flash); the real saved theme is hydrated from the
+// shell's first-party store when the config-result arrives (see boot relay).
+const _inDash = (function () {
+  try { return !!window.parent && window.parent !== window; } catch (e) { return false; }
+})();
+applyTheme(_inDash ? "dark" : (localStorage.getItem(THEME_KEY) || "light"));
 
 /* ============ Boot ============ */
 async function boot() {
@@ -999,8 +1034,22 @@ async function refreshAll() {
     state.items = listR.items || [];
     rebuildCatalogIndex();
     populateRetailerFilter();
+    // Stage 3: snapshot the last-good server state for offline reads.
+    if (window.ShopSync) window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
   } catch (err) {
-    showConfigBanner("Couldn't reach the server: " + err.message + ". Tap to open settings.");
+    // Offline — hydrate from the saved snapshot so the app opens with your last
+    // list + catalog instead of an empty screen.
+    const snap = window.ShopSync ? await window.ShopSync.loadSnapshot() : null;
+    if (snap) {
+      state.retailers = snap.retailers || [];
+      state.catalog = snap.catalog || [];
+      state.items = snap.items || [];
+      rebuildCatalogIndex();
+      populateRetailerFilter();
+      toast("Offline — showing your saved list", 2000);
+    } else {
+      showConfigBanner("Couldn't reach the server: " + err.message + ". Tap to open settings.");
+    }
   } finally {
     state.loading = false;
     render();
@@ -1511,6 +1560,21 @@ async function addItem(query, productId) {
     else toast(`Added ${displayName}`);
     return true;
   } catch (err) {
+    if (isOfflineError(err) && window.ShopSync) {
+      // Offline: create an optimistic local row (client id) and queue the add.
+      // On reconnect the server assigns the real row; the next refreshList
+      // replaces this placeholder. Server dedups by name so replay is safe.
+      const localId = "local-" + crypto.randomUUID();
+      const item = { id: localId, name: trimmed, quantity: 1, checked: 0, retailer_id: null, aisle_id: null, _local: true };
+      if (productId) item.product_id = productId;
+      state.items.push(item);
+      render();
+      const body = productId ? { name: trimmed, product_id: productId } : { name: trimmed };
+      await window.ShopSync.queueOp("/api/list/add", body);
+      window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
+      toast(`Added ${trimmed} offline — will sync`);
+      return true;
+    }
     toast("Add failed: " + err.message, 2500);
     return false;
   }
@@ -1526,8 +1590,15 @@ async function toggleItem(id) {
   try {
     await api("/api/list/check", { method: "POST", body: { id, checked: !!next } });
   } catch (err) {
-    it.checked = next ? 0 : 1; render();
-    alert("Couldn't update: " + err.message);
+    if (isOfflineError(err) && window.ShopSync) {
+      // Offline: keep the optimistic tick and queue it durably for replay.
+      await window.ShopSync.queueOp("/api/list/check", { id, checked: !!next });
+      window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
+      toast("Saved offline — will sync");
+    } else {
+      it.checked = next ? 0 : 1; render();
+      alert("Couldn't update: " + err.message);
+    }
   }
 }
 
@@ -1539,8 +1610,15 @@ async function deleteItem(id) {
   try {
     await api("/api/list/delete", { method: "POST", body: { id } });
   } catch (err) {
-    state.items = before; render();
-    alert("Delete failed: " + err.message);
+    if (isOfflineError(err) && window.ShopSync) {
+      // Offline: keep the optimistic removal and queue the delete for replay.
+      await window.ShopSync.queueOp("/api/list/delete", { id });
+      window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
+      toast("Removed offline — will sync");
+    } else {
+      state.items = before; render();
+      alert("Delete failed: " + err.message);
+    }
   }
 }
 
@@ -1599,6 +1677,13 @@ async function refreshList() {
     render();
   } catch (err) { /* ignore */ }
 }
+
+// Called by sync-bridge.js after the offline outbox drains on reconnect, so the
+// list reflects the server's canonical rows (replacing any local- placeholders).
+window.onShopDrained = function () {
+  refreshList();
+  if (window.ShopSync) window.ShopSync.saveSnapshot({ retailers: state.retailers, catalog: state.catalog, items: state.items });
+};
 
 /* ============ Edit item modal ============ */
 let editingItemId = null;
@@ -2761,18 +2846,29 @@ if ("serviceWorker" in navigator) {
     window.removeEventListener('message', handler);
     clearTimeout(timer);
     var cfg = e.data.config || {};
+    console.log('[shop] config-result received, token present:', !!cfg.token);
     if (cfg.token)  config.token  = cfg.token;
     if (cfg.apiUrl) config.apiUrl = cfg.apiUrl;
+    // Hydrate the saved theme from the shell's first-party store (iOS wipes
+    // our own partitioned localStorage). No stored pref → keep dark default.
+    if (cfg.prefs && cfg.prefs.theme) applyTheme(cfg.prefs.theme);
     boot();
   }
   window.addEventListener('message', handler);
   // 3s timeout: fall through to boot() even if the shell doesn't respond
   timer = setTimeout(function () {
+    console.warn('[shop] config-request timed out — booting without injected token');
     window.removeEventListener('message', handler);
     boot();
   }, 3000);
+  console.log('[shop] IN_DASH detected, requesting config from shell…');
   window.parent.postMessage({ v: 1, type: 'config-request', id: id, app: 'shop' }, '*');
 })();
 </script>
+
+<!-- Stage 3: offline snapshot + durable mutation outbox via @dooo/core. Additive
+     — the classic script keeps its online path; only offline reads/mutations use
+     this. Falls back gracefully if IndexedDB is unavailable. -->
+<script type="module" src="/sync-bridge.js"></script>
 </body>
 </html>
