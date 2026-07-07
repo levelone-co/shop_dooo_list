@@ -15,12 +15,49 @@
 // replays it through the app's own global api(). Server-side idempotency keeps
 // replays safe.
 
-import { SyncEngine } from "./vendor/dooo-core/index.js";
+import {
+  SyncEngine, openDB, decodeJwtClaims,
+  createSessionStore, consumeMagicLinkLanding, mountSignIn, renewIfStale,
+} from "./vendor/dooo-core/index.js";
 
 const g = window;
+const DOOO_API = "https://dooo-api.apps-8ec.workers.dev"; // /auth/* live on dooo-api, not the shop worker
+
+// ── Stage 4: standalone session (magic link) → set config.token = JWT, then
+// boot. In-shell copies already got their token from the dash bridge. ──
+if (g.__shopStandalone) {
+  let authIdb = null;
+  try { authIdb = await openDB("shopdooo-auth"); } catch { /* private mode → legacy path */ }
+  if (authIdb) {
+    const store = createSessionStore(authIdb);
+    let session = await consumeMagicLinkLanding(DOOO_API, store);
+    if (!session) session = await store.load();
+    const legacyToken = (() => { try { return JSON.parse(localStorage.getItem("shopwise.config.v1") || "{}").token; } catch { return ""; } })();
+
+    if (!session && !legacyToken) {
+      await mountSignIn({ apiBase: DOOO_API, redirect: location.origin + "/", sessionStore: store, appName: "shop dooo" });
+      location.reload();
+    } else {
+      if (session) {
+        g.__applyShopSession(session);
+        renewIfStale(DOOO_API, session).then((s) => s && s.jwt !== session.jwt && store.save(s)).catch(() => {});
+      }
+      g.__shopBoot();
+    }
+  } else {
+    g.__shopBoot(); // no IDB → legacy/paste-token path
+  }
+}
+
+// Scope the engine's local store per household (best-effort from the current
+// token; server-side scoping is the real isolation boundary).
+const scope = (() => {
+  try { return decodeJwtClaims((g.__shopConfig && g.__shopConfig().token) || "")?.hh || null; } catch { return null; }
+})();
 
 const engine = new SyncEngine({
   name: "shopdooo",
+  scope,
   pollMs: 0,
   transport: {
     pull: async () => [],

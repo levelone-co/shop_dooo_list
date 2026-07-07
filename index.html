@@ -2833,11 +2833,19 @@ if ("serviceWorker" in navigator) {
 // When embedded in dash dooo, localStorage is partitioned by the top-level
 // origin — the token and apiUrl saved standalone are invisible here. Request
 // them from the shell before booting so the app loads without manual re-entry.
+// Stage 4 hooks used by sync-bridge.js (the module) to inject the session JWT
+// and drive the standalone boot after resolving the magic-link session.
+window.__shopBoot = boot;
+window.__shopConfig = function () { return config; };
+window.__applyShopSession = function (s) { if (s && s.jwt) config.token = s.jwt; };
+
 (function () {
   var inDash = (function () {
     try { return !!window.parent && window.parent !== window; } catch (e) { return false; }
   })();
-  if (!inDash) { boot(); return; }
+  // Standalone: defer to sync-bridge, which resolves the session (or shows the
+  // sign-in overlay) and then calls window.__shopBoot().
+  if (!inDash) { window.__shopStandalone = true; return; }
 
   var id = 'shop-cfg-' + Date.now();
   var timer;

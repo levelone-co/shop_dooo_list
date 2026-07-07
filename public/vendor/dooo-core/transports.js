@@ -26,10 +26,14 @@ function withQuery(base, params) {
 export function createTodoTransport({ baseUrl, getToken }) {
   const token = () => (typeof getToken === "function" ? getToken() : getToken) || "";
   const base = () => (typeof baseUrl === "function" ? baseUrl() : baseUrl) || "";
+  // Stage 4: carry the token in an Authorization header, not the query string /
+  // body. Session JWTs are accepted by dooo-api ONLY from headers (kept out of
+  // URL logs); legacy/api tokens work from headers too, so this is back-compat.
+  const auth = () => (token() ? { Authorization: `Bearer ${token()}` } : {});
   return {
     async pull() {
-      const url = withQuery(base(), { token: token(), _: Date.now() });
-      const resp = await fetch(url, { method: "GET", cache: "no-store" });
+      const url = withQuery(base(), { _: Date.now() });
+      const resp = await fetch(url, { method: "GET", cache: "no-store", headers: auth() });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       if (!data.ok || !Array.isArray(data.todos)) throw new Error("bad pull response");
@@ -38,8 +42,8 @@ export function createTodoTransport({ baseUrl, getToken }) {
     async push(records) {
       const resp = await fetch(base(), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "sync", token: token(), todos: records }),
+        headers: { "Content-Type": "application/json", ...auth() },
+        body: JSON.stringify({ action: "sync", todos: records }),
       });
       if (!resp.ok) return { ok: false, status: resp.status, error: `HTTP ${resp.status}` };
       return resp.json();
