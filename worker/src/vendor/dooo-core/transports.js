@@ -51,6 +51,71 @@ export function createTodoTransport({ baseUrl, getToken }) {
   };
 }
 
+// note.dooo notes --------------------------------------------------------------
+//
+// GET  <base>/api/notes-sync?_=<ts>        -> { ok, notes: [...] }
+// POST <base>/api/notes-sync { action:'sync', notes } -> { ok, synced }
+//
+// Same LWW-by-updated_at contract as to.dooo; `base` is the dooo-api origin and
+// the adapter owns the path. cache:"no-store" + cache-bust so a pull right after
+// a push never serves a stale snapshot.
+export function createNotesTransport({ baseUrl, getToken, path = "/api/notes-sync" }) {
+  const token = () => (typeof getToken === "function" ? getToken() : getToken) || "";
+  const base = () => (typeof baseUrl === "function" ? baseUrl() : baseUrl) || "";
+  const auth = () => (token() ? { Authorization: `Bearer ${token()}` } : {});
+  return {
+    async pull() {
+      const url = withQuery(base() + path, { _: Date.now() });
+      const resp = await fetch(url, { method: "GET", cache: "no-store", headers: auth() });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      if (!data.ok || !Array.isArray(data.notes)) throw new Error("bad pull response");
+      return data.notes;
+    },
+    async push(records) {
+      const resp = await fetch(base() + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...auth() },
+        body: JSON.stringify({ action: "sync", notes: records }),
+      });
+      if (!resp.ok) return { ok: false, status: resp.status, error: `HTTP ${resp.status}` };
+      return resp.json();
+    },
+  };
+}
+
+// note.dooo reminders ----------------------------------------------------------
+//
+// GET  <base>/api/reminders-sync?_=<ts>    -> { ok, reminders: [...] }
+// POST <base>/api/reminders-sync { action:'sync', reminders } -> { ok, synced }
+//
+// notified_at is server-owned: the client sends its records but dooo-api never
+// lets an inbound sync clear a delivered reminder's notified_at flag.
+export function createRemindersTransport({ baseUrl, getToken, path = "/api/reminders-sync" }) {
+  const token = () => (typeof getToken === "function" ? getToken() : getToken) || "";
+  const base = () => (typeof baseUrl === "function" ? baseUrl() : baseUrl) || "";
+  const auth = () => (token() ? { Authorization: `Bearer ${token()}` } : {});
+  return {
+    async pull() {
+      const url = withQuery(base() + path, { _: Date.now() });
+      const resp = await fetch(url, { method: "GET", cache: "no-store", headers: auth() });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      if (!data.ok || !Array.isArray(data.reminders)) throw new Error("bad pull response");
+      return data.reminders;
+    },
+    async push(records) {
+      const resp = await fetch(base() + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...auth() },
+        body: JSON.stringify({ action: "sync", reminders: records }),
+      });
+      if (!resp.ok) return { ok: false, status: resp.status, error: `HTTP ${resp.status}` };
+      return resp.json();
+    },
+  };
+}
+
 // pre-dooo inbox ---------------------------------------------------------------
 //
 // Capture is append-with-dedup; the engine's dedupeField handles the client side.
