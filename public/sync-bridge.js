@@ -32,16 +32,21 @@ if (g.__shopStandalone) {
     const store = createSessionStore(authIdb);
     let session = await consumeMagicLinkLanding(DOOO_API, store);
     if (!session) session = await store.load();
-    const legacyToken = (() => { try { return JSON.parse(localStorage.getItem("shopwise.config.v1") || "{}").token; } catch { return ""; } })();
 
-    if (!session && !legacyToken) {
+    // Standalone, not signed in → require magic-link sign-in. Legacy paste-tokens
+    // are retired: a stale token (e.g. the old shop-dooo-api SHOPWISE_AUTH_TOKEN)
+    // must NOT skip sign-in — dooo-api would reject it and every request 401s.
+    // Strip it so config.token can't ride a dead credential, then sign in.
+    if (!session) {
+      try {
+        const c = JSON.parse(localStorage.getItem("shopwise.config.v1") || "{}");
+        if (c && c.token) { delete c.token; localStorage.setItem("shopwise.config.v1", JSON.stringify(c)); }
+      } catch {}
       await mountSignIn({ apiBase: DOOO_API, redirect: location.origin + "/", sessionStore: store, appName: "shop dooo" });
       location.reload();
     } else {
-      if (session) {
-        g.__applyShopSession(session);
-        renewIfStale(DOOO_API, session).then((s) => s && s.jwt !== session.jwt && store.save(s)).catch(() => {});
-      }
+      g.__applyShopSession(session);
+      renewIfStale(DOOO_API, session).then((s) => s && s.jwt !== session.jwt && store.save(s)).catch(() => {});
       g.__shopBoot();
     }
   } else {
